@@ -88,6 +88,10 @@ class Engine:
     def recover(self) -> int:
         """После перезапуска: возвращает «зависшие» посты в рабочие статусы."""
         n = 0
+        if not self.db.get("migr:tag_attempts_reset_1"):
+            # В прошлой версии общий сбой разметки засчитывался каждому фото и выключал их.
+            self.db.x("UPDATE assets SET tag_attempts=0 WHERE title IS NULL")
+            self.db.set("migr:tag_attempts_reset_1", "1")
         for p in self.db.posts("publishing"):
             self.db.update_post(p["id"], status="failed", error="сервис перезапустился во время публикации")
             self.say(f"⚠️ Ролик #{p['id']} публиковался в момент перезапуска сервиса. "
@@ -152,13 +156,24 @@ class Engine:
     def job_tag(self) -> int:
         images.scan(self.cfg, self.db)
         if not (self.cfg.gemini_api_key or self.cfg.openai_api_key):
+            if images.untagged_count(self.db) and self._once("warn:no_ai_key"):
+                self.say("⚠️ Не задан ни GEMINI_API_KEY, ни OPENAI_API_KEY — фото не размечаются, "
+                         "сценарии пишутся по шаблону. Добавь ключ в переменные Railway.")
             return 0
-        n = images.tag_library(self.cfg, self.db, self.ai, pbm.load(self.cfg.playbook_path)["themes"], limit=10)
+        try:
+            n = images.tag_library(self.cfg, self.db, self.ai, pbm.load(self.cfg.playbook_path)["themes"], limit=10)
+        except images.TaggingError as e:
+            # Сообщаем один раз на каждую новую ошибку, а не каждые 5 минут.
+            if self.db.get("last_tag_error") != str(e)[:300]:
+                self.say(f"⚠️ {e}\nРолики при этом собираются и из неразмеченных фото. "
+                         "Если ошибка про ключ или модель — проверь переменные Railway.")
+            self.db.set("last_tag_error", str(e)[:300])
+            return 0
         if n:
-            left = self.db.one("SELECT COUNT(*) n FROM assets WHERE kind='library' AND title IS NULL")["n"]
-            if not left:
-                self.say(f"Разметил фото библиотеки. Готово к роликам: "
-                         f"{self.db.one('SELECT COUNT(*) n FROM assets WHERE kind=? AND title IS NOT NULL', ('library',))['n']}.")
+            self.db.set("last_tag_error", "")
+            if not images.untagged_count(self.db):
+                ready = self.db.one("SELECT COUNT(*) n FROM assets WHERE kind='library' AND title IS NOT NULL")["n"]
+                self.say(f"Разметил фото библиотеки. Готово к роликам: {ready}.")
         return n
 
     def job_push(self) -> int:

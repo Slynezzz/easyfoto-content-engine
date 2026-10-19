@@ -139,21 +139,54 @@ class ProducerTests(unittest.TestCase):
             produce(self.cfg, self.db, FakeAI(), self.pb, self.today)
         self.assertIn("библиотек", str(ctx.exception))
 
-    def test_untaggable_photo_is_skipped_after_three_attempts(self):
-        self._fill("library", 2)
+    def test_global_tagging_failure_raises_and_does_not_burn_attempts(self):
+        self._fill("library", 4)
         images.scan(self.cfg, self.db)
 
-        class Refusing(FakeAI):
+        class Down(FakeAI):
             def json(self, system, prompt, images=None, temperature=0.9):
-                if images:
+                raise AIError("API key not valid")
+        for _ in range(5):
+            with self.assertRaises(images.TaggingError) as ctx:
+                images.tag_library(self.cfg, self.db, Down(), self.pb["themes"])
+        self.assertIn("API key not valid", str(ctx.exception))
+        self.assertTrue(all(r["tag_attempts"] == 0 for r in self.db.assets("library")))
+
+    def test_single_bad_photo_is_skipped_after_three_attempts(self):
+        self._fill("library", 3)
+        images.scan(self.cfg, self.db)
+        bad_id = self.db.assets("library")[1]["id"]
+
+        class OneBad(FakeAI):
+            def json(self, system, prompt, images=None, temperature=0.9):
+                if images and f"tag_{bad_id}." in str(images[0]):
                     raise AIError("refused")
                 return super().json(system, prompt, images, temperature)
-        ai = Refusing()
         for _ in range(5):
-            images.tag_library(self.cfg, self.db, ai, self.pb["themes"])
-        self.assertEqual(len(ai.json_calls), 0)  # отказы не считаются как вызовы JSON-ответа
-        rows = self.db.assets("library")
-        self.assertTrue(all(r["tag_attempts"] == 3 for r in rows))
+            images.tag_library(self.cfg, self.db, OneBad(), self.pb["themes"])
+        rows = {r["id"]: r for r in self.db.assets("library")}
+        self.assertEqual(rows[bad_id]["tag_attempts"], 3)
+        self.assertEqual(sum(1 for r in rows.values() if r["title"]), 2)
+
+    def test_reel_is_made_even_when_tagging_is_down(self):
+        self._fill("library", 6)
+        images.scan(self.cfg, self.db)
+
+        class Down(FakeAI):
+            def json(self, system, prompt, images=None, temperature=0.9):
+                raise AIError("quota exceeded")
+        with mock.patch("engine.producer.render", return_value=10.0):
+            post_id = produce(self.cfg, self.db, Down(), self.pb, self.today, rng=random.Random(2))
+        post = self.db.post(post_id)
+        self.assertEqual((post["status"], post["theme"]), ("rendered", "mixed"))
+        self.assertIn("quota exceeded", self.db.get("last_tag_error"))
+
+    def test_make_tags_photos_right_away(self):
+        self._fill("library", 6)
+        images.scan(self.cfg, self.db)
+        with mock.patch("engine.producer.render", return_value=10.0):
+            produce(self.cfg, self.db, FakeAI(), self.pb, self.today, rng=random.Random(2))
+        self.assertGreaterEqual(sum(1 for r in self.db.assets("library") if r["title"]), 4)
 
     def test_out_of_season_theme_never_used_as_fallback(self):
         self._fill("library", 5)

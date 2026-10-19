@@ -179,6 +179,24 @@ class EngineTests(unittest.TestCase):
         self.ig.refresh_token.assert_not_called()
         self.assertTrue(self.engine.job_token())
 
+    def test_tagging_error_is_reported_once(self):
+        self.cfg.gemini_api_key = "k"
+        err = __import__("engine.images", fromlist=["TaggingError"]).TaggingError("не получилось разметить фото: bad key")
+        with mock.patch("engine.app.images.tag_library", side_effect=err), \
+             mock.patch("engine.app.images.scan"):
+            self.engine.job_tag()
+            self.engine.job_tag()
+        self.assertEqual(sum(1 for t, _ in self.bot.said if "bad key" in t), 1)
+
+    def test_recover_resets_burned_tag_attempts_once(self):
+        aid = self.db.add_asset("/x.jpg", "library")
+        self.db.x("UPDATE assets SET tag_attempts=3 WHERE id=?", (aid,))
+        self.engine.recover()
+        self.assertEqual(self.db.one("SELECT tag_attempts FROM assets WHERE id=?", (aid,))["tag_attempts"], 0)
+        self.db.x("UPDATE assets SET tag_attempts=3 WHERE id=?", (aid,))
+        self.engine.recover()
+        self.assertEqual(self.db.one("SELECT tag_attempts FROM assets WHERE id=?", (aid,))["tag_attempts"], 3)
+
     def test_tick_survives_failing_job(self):
         self.engine.job_tag = mock.Mock(side_effect=RuntimeError("x"))
         self.engine.tick()

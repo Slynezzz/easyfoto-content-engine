@@ -92,6 +92,8 @@ class DB:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(assets)")}
         if "tag_attempts" not in cols:
             self._conn.execute("ALTER TABLE assets ADD COLUMN tag_attempts INTEGER NOT NULL DEFAULT 0")
+        if "tg_message_id" not in cols:
+            self._conn.execute("ALTER TABLE assets ADD COLUMN tg_message_id INTEGER")
 
     def close(self) -> None:
         with self._lock:

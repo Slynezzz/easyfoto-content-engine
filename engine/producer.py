@@ -37,11 +37,18 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
     plan: planner.Plan | None = None
 
     if cfg.image_source in ("library", "mixed"):
+        if images.untagged_count(db):
+            try:  # размечаем сразу, не дожидаясь фоновой задачи
+                images.tag_library(cfg, db, ai, pb["themes"], limit=n * 2)
+            except images.TaggingError as e:
+                log.warning("разметка перед сборкой не удалась: %s", e)
+                db.set("last_tag_error", str(e)[:300])
         rows, theme = images.pick_library(db, choice.theme, n, rng, pbm.theme_weights(pb, today))
         if len(rows) >= MIN_PHOTOS:
             choice = dataclasses.replace(choice, theme=theme)
             photos = rows
-            notes = [f"{r['title']} — {r['description'] or ''}".strip(" —") for r in rows]
+            notes = [f"{r['title'] or 'образ без описания'} — {r['description'] or ''}".strip(" —")
+                     for r in rows]
             plan = planner.plan(ai, pb, choice, len(rows), photo_notes=notes,
                                 gender=cfg.persona_gender, bot=cfg.bot_username)
 

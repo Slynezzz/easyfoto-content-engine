@@ -190,6 +190,38 @@ class AdminBotTests(unittest.TestCase):
         self.assertEqual(len(self.db.assets("ref")), 1)
         self.assertEqual(len(self.db.assets("library")), 1)
 
+    def test_move_last_uploaded_to_before(self):
+        photo = {"photo": [{"file_id": "big"}]}
+        for i in range(7):
+            m = msg(**photo)
+            m["message"]["message_id"] = 500 + i
+            self.bot.handle(m)
+        self.bot.handle(msg("/move 5 до"))
+        self.assertEqual(len(self.db.assets("before")), 5)
+        self.assertEqual(len(self.db.assets("library")), 2)
+        for r in self.db.assets("before"):
+            self.assertTrue(Path(r["path"]).exists())
+            self.assertIn("/before/", r["path"])
+        self.assertIn("Перенёс 5", self.api.texts()[-1])
+
+    def test_move_by_reply(self):
+        m = msg(photo=[{"file_id": "big"}])
+        m["message"]["message_id"] = 900
+        self.bot.handle(m)
+        self.bot.handle(msg("реф", reply_to_message={"message_id": 900}))
+        self.assertEqual(len(self.db.assets("ref")), 1)
+        self.bot.handle(msg("что-то", reply_to_message={"message_id": 900}))
+        self.assertIn("одним словом", self.api.texts()[-1])
+
+    def test_move_usage_hint(self):
+        self.bot.handle(msg("/move до"))
+        self.assertIn("/move 5 до", self.api.texts()[-1])
+
+    def test_status_shows_tagging_error(self):
+        self.db.set("last_tag_error", "не получилось разметить фото: API key not valid")
+        self.bot.handle(msg("/status"))
+        self.assertIn("API key not valid", self.api.texts()[-1])
+
     def test_rejects_non_image_documents(self):
         self.bot.handle(msg(document={"file_id": "x", "file_name": "doc.pdf", "file_size": 10}))
         self.assertTrue(any("Это не фото" in t for t in self.api.texts()))

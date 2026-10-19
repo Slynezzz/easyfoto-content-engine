@@ -31,12 +31,15 @@ HELP = """Команды:
 /analyze — пересчитать плейбук по статистике
 /pause и /resume — остановить или включить автопубликацию
 /scan — разобрать новые фото
+/move 5 до — перенести 5 последних фото в селфи «до» (или «реф», «библиотека»)
 
 Фото: просто пришли их сюда (лучше файлом, без сжатия).
 Подпись к фото или альбому:
 • без подписи — в библиотеку готовых нейрофото
 • «до» — обычные селфи для формата «было → стало»
-• «реф» — референсы для генерации новых кадров"""
+• «реф» — референсы для генерации новых кадров
+
+Ошибся папкой? Ответь на своё фото словом «до», «реф» или «библиотека»."""
 
 
 @dataclass
@@ -180,7 +183,10 @@ class AdminBot:
             return
         text = (msg.get("text") or "").strip()
         if text.startswith("/"):
-            self.on_command(text.split()[0].split("@")[0].lower())
+            parts = text.split()
+            self.on_command(parts[0].split("@")[0].lower(), parts[1:])
+        elif msg.get("reply_to_message") and text:
+            self.on_reply(text, msg["reply_to_message"])
 
     # ------------------------------------------------------------ files
     def _kind_from_caption(self, msg: dict) -> str:
@@ -216,14 +222,73 @@ class AdminBot:
         dest = self.cfg.assets_dir / kind / f"{uuid.uuid4().hex[:12]}{ext}"
         self.api.download(file_id, dest)
         images.scan(self.cfg, self.db)
+        # запоминаем сообщение, чтобы фото можно было перенести ответом на него
+        self.db.x("UPDATE assets SET tg_message_id=? WHERE path=?", (msg.get("message_id"), str(dest)))
         total = len(self.db.assets("ref" if kind == "refs" else kind))
         label = {"library": "библиотеке", "before": "селфи «до»", "refs": "референсах"}[kind]
         # на альбом отвечаем один раз, а не на каждое фото
         if not msg.get("media_group_id") or msg.get("caption") is not None or total % 5 == 0:
             self.say(f"Сохранил. Сейчас в {label}: {total}.")
 
+    # ------------------------------------------------------- moving files
+    @staticmethod
+    def parse_kind(word: str) -> str | None:
+        w = word.strip().lower().strip(".!«»\"")
+        if w.startswith(("до", "before", "селфи")):
+            return "before"
+        if w.startswith(("реф", "ref")):
+            return "refs"
+        if w.startswith(("библ", "lib", "после")):
+            return "library"
+        return None
+
+    def move_asset(self, row, kind: str) -> bool:
+        """Переносит фото в другую папку (библиотека / до / реф)."""
+        db_kind = "ref" if kind == "refs" else kind
+        if row["kind"] == db_kind:
+            return False
+        src = Path(row["path"])
+        dest = self.cfg.assets_dir / kind / src.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if src.exists():
+            src.replace(dest)
+        # В библиотеке фото нужна разметка; в других папках она не используется.
+        self.db.x("UPDATE assets SET path=?, kind=?, title=NULL, theme=NULL, description=NULL, "
+                  "tag_attempts=0 WHERE id=?", (str(dest), db_kind, row["id"]))
+        return True
+
+    def _counts_text(self) -> str:
+        return (f"Библиотека: {len(self.db.assets('library'))}, селфи «до»: {len(self.db.assets('before'))}, "
+                f"референсы: {len(self.db.assets('ref'))}.")
+
+    def on_reply(self, text: str, replied: dict) -> None:
+        kind = self.parse_kind(text)
+        if not kind:
+            self.say("Чтобы перенести фото, ответь на него одним словом: «до», «реф» или «библиотека».")
+            return
+        row = self.db.one("SELECT * FROM assets WHERE tg_message_id=?", (replied.get("message_id"),))
+        if not row:
+            self.say("Не нашёл это фото. Отвечать нужно на своё сообщение с фото, "
+                     "или используй /move — например, /move 5 до.")
+            return
+        moved = self.move_asset(row, kind)
+        self.say(("Перенёс. " if moved else "Оно уже там. ") + self._counts_text())
+
+    def move_last(self, args: list[str]) -> None:
+        n = next((int(a) for a in args if a.isdigit()), 0)
+        kind = next((k for k in map(self.parse_kind, args) if k), None)
+        if not n or not kind:
+            self.say("Как пользоваться: /move 5 до — перенести 5 последних загруженных фото "
+                     "в селфи «до». Вместо «до» можно «реф» или «библиотека».")
+            return
+        rows = self.db.q("SELECT * FROM assets WHERE kind IN ('library','before','ref') "
+                         "ORDER BY id DESC LIMIT ?", (min(n, 50),))
+        moved = sum(self.move_asset(r, kind) for r in rows)
+        self.say(f"Перенёс {moved} фото. " + self._counts_text())
+
     # ---------------------------------------------------------- commands
-    def on_command(self, cmd: str) -> None:
+    def on_command(self, cmd: str, args: list[str] | None = None) -> None:
+        args = args or []
         if cmd in ("/start", "/help"):
             self.say(HELP)
         elif cmd == "/make":
@@ -248,6 +313,8 @@ class AdminBot:
         elif cmd == "/resume":
             self.db.set("paused", "0")
             self.say("▶️ Автопубликация включена.")
+        elif cmd == "/move":
+            self.move_last(args)
         elif cmd == "/scan":
             added = images.scan(self.cfg, self.db)
             self.say(f"Новых файлов: {sum(added.values())}. Разметка библиотеки идёт в фоне.")
@@ -272,6 +339,8 @@ class AdminBot:
             f"Источник фото: {self.cfg.image_source}",
             f"Библиотека: {lib['n'] or 0} фото, размечено {lib['t'] or 0}",
             f"Селфи «до»: {len(self.db.assets('before'))}, референсов: {len(self.db.assets('ref'))}",
+            *([f"⚠️ Последняя ошибка разметки: {self.db.get('last_tag_error')}"]
+              if self.db.get("last_tag_error") else []),
             "Посты: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "пока нет"),
             f"Последняя публикация: {last['published_at']} {last['permalink'] or ''}" if last else "Публикаций пока нет",
         ])

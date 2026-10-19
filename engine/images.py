@@ -79,35 +79,60 @@ def _thumb(path: str, size: int = 768) -> bytes:
     return buf.getvalue()
 
 
+class TaggingError(AIError):
+    """Разметка не сработала ни для одного фото — проблема общая (ключ, модель, сеть)."""
+
+
 def tag_library(cfg: Config, db: DB, ai: AI, themes: dict[str, dict], limit: int = 50) -> int:
-    """Подписывает неразмеченные фото библиотеки. Возвращает число размеченных."""
+    """Подписывает неразмеченные фото библиотеки. Возвращает число размеченных.
+
+    Если не удалось разметить ни одного фото, это общая проблема (ключ, модель,
+    сеть), а не проблема фото: попытки не засчитываются, бросается TaggingError
+    с текстом ошибки, чтобы владелец её увидел. Попытка засчитывается фото, только
+    когда соседние фото в том же прогоне размечаются нормально.
+    """
+    # Сначала новые фото: по ним видно, работает ли разметка вообще.
     rows = db.q("SELECT * FROM assets WHERE kind='library' AND title IS NULL AND tag_attempts < ? "
-                "ORDER BY id LIMIT ?", (MAX_TAG_ATTEMPTS, limit))
+                "ORDER BY tag_attempts, id LIMIT ?", (MAX_TAG_ATTEMPTS, limit))
     if not rows:
         return 0
     theme_list = "\n".join(f"- {k}: {v['title']}" for k, v in themes.items())
     tmp = cfg.data_dir / "work"
     tmp.mkdir(parents=True, exist_ok=True)
-    done = 0
+    done, failed = 0, []
     for row in rows:
         thumb = tmp / f"tag_{row['id']}.jpg"
         try:
             thumb.write_bytes(_thumb(row["path"]))
             res = ai.json(TAG_SYSTEM, f"Темы:\n{theme_list}", images=[thumb], temperature=0.2)
+            if not isinstance(res, dict):
+                raise AIError("ответ разметки не объект")
         except (AIError, OSError) as e:
             log.warning("tagging %s failed: %s", row["path"], e)
-            db.x("UPDATE assets SET tag_attempts=tag_attempts+1 WHERE id=?", (row["id"],))
+            failed.append((row["id"], e, row["tag_attempts"]))
+            if done == 0 and len(failed) >= 2 and all(f[2] == 0 for f in failed):
+                break  # первые два подряд не прошли — скорее всего, сломано всё; не тратим запросы
             continue
         finally:
             thumb.unlink(missing_ok=True)
-        theme = res.get("theme") if isinstance(res, dict) else None
+        theme = res.get("theme")
         if theme not in themes:
             theme = next(iter(themes))
         title = str(res.get("title") or "Новый образ")[:24]
         db.x("UPDATE assets SET title=?, theme=?, description=? WHERE id=?",
              (title, theme, str(res.get("description") or "")[:300], row["id"]))
         done += 1
+    # Общий сбой — когда не прошло ни одно фото и среди упавших есть новые.
+    # Фото, которое уже падало, пока соседние размечались, — проблемное само по себе.
+    if failed and done == 0 and any(f[2] == 0 for f in failed):
+        raise TaggingError(f"не получилось разметить фото: {failed[0][1]}")
+    for aid, _, _ in failed:
+        db.x("UPDATE assets SET tag_attempts=tag_attempts+1 WHERE id=?", (aid,))
     return done
+
+
+def untagged_count(db: DB) -> int:
+    return db.one("SELECT COUNT(*) n FROM assets WHERE kind='library' AND title IS NULL")["n"]
 
 
 def pick_library(db: DB, theme: str, n: int, rng: random.Random,
@@ -115,9 +140,11 @@ def pick_library(db: DB, theme: str, n: int, rng: random.Random,
     """n фото из библиотеки: сначала из темы, наименее использованные.
 
     Возвращает (фото, фактическая тема). Если в теме мало фото — берёт
-    тему, где их хватает; если нигде не хватает — смесь (тема "mixed").
+    тему, где их хватает; если нигде не хватает — смесь (тема "mixed"),
+    куда при нужде попадают и неразмеченные фото.
     """
-    tagged = [r for r in db.assets("library") if r["title"]]
+    library = db.assets("library")
+    tagged = [r for r in library if r["title"]]
     by_theme: dict[str, list] = {}
     for r in tagged:
         by_theme.setdefault(r["theme"], []).append(r)
@@ -130,8 +157,9 @@ def pick_library(db: DB, theme: str, n: int, rng: random.Random,
 
     if len(by_theme.get(theme, [])) >= n:
         return take(by_theme[theme]), theme
-    def allowed(t: str) -> bool:
-        return weights is None or weights.get(t, 0) > 0
+
+    def allowed(t: str | None) -> bool:
+        return t is None or weights is None or weights.get(t, 0) > 0
 
     enough = [t for t, rows in by_theme.items() if len(rows) >= n and allowed(t)]
     if enough:
@@ -139,6 +167,9 @@ def pick_library(db: DB, theme: str, n: int, rng: random.Random,
         t = rng.choices(enough, weights=w, k=1)[0]
         return take(by_theme[t]), t
     pool = [r for r in tagged if allowed(r["theme"])]
+    if len(pool) < n:
+        # Размеченных мало — добираем неразмеченными, чтобы ролик всё равно собрался.
+        pool += [r for r in library if not r["title"]]
     if len(pool) >= 3:
         return take(pool), "mixed"
     return [], theme
