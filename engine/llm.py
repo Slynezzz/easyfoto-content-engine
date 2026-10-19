@@ -31,6 +31,16 @@ class AIRefused(AIError):
     """Модель отказала (фильтр безопасности) — повтор тем же запросом бессмыслен."""
 
 
+class AIHTTPError(AIError):
+    def __init__(self, status: int, message: str):
+        super().__init__(f"HTTP {status}: {message}")
+        self.status = status
+
+
+# Ответы, по которым видно: адрес не понимает запросы в формате Google.
+ROUTE_MISMATCH = (400, 404, 405, 415, 501)
+
+
 @dataclass
 class ImageResult:
     data: bytes
@@ -47,12 +57,16 @@ def _post(url: str, *, retries: int = 3, timeout: int = 120, **kw) -> dict:
             last = e
         else:
             if r.status_code == 200:
-                return r.json()
+                try:
+                    return r.json()
+                except ValueError:
+                    # по адресу отвечает не API, а, например, сайт посредника
+                    raise AIHTTPError(200, f"ответ не JSON: {r.text[:120]}") from None
             body = _error_text(r)
             if r.status_code in (429, 500, 502, 503, 504):
-                last = AIError(f"HTTP {r.status_code}: {body}")
+                last = AIHTTPError(r.status_code, body)
             else:
-                raise AIError(f"HTTP {r.status_code}: {body}")
+                raise AIHTTPError(r.status_code, body)
         time.sleep(2 * (attempt + 1))
     raise AIError(f"не удалось после {retries} попыток: {last}")
 
@@ -92,24 +106,56 @@ def parse_json(text: str) -> dict | list:
         return json.loads(text[start:end + 1])
 
 
+def _root(url: str) -> str:
+    """Адрес без хвоста /v1 или /v1beta — чтобы было неважно, как его вставили."""
+    url = (url or "").strip().rstrip("/")
+    return re.sub(r"/v1(beta)?$", "", url)
+
+
 class AI:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        # Формат запросов к Gemini: native (как у Google) или openai (как у OpenAI).
+        # auto — определяется при первом запросе и запоминается до перезапуска.
+        style = (getattr(cfg, "gemini_api_style", "") or "auto").lower()
+        self.gemini_style: str | None = style if style in ("native", "openai") else None
 
     # ------------------------------------------------------------ адреса
+    @property
+    def _gemini_root(self) -> str:
+        return _root(self.cfg.gemini_base_url or DEFAULT_GEMINI_BASE)
+
+    @property
+    def _is_google(self) -> bool:
+        return self._gemini_root == DEFAULT_GEMINI_BASE
+
     def _gemini_url(self, model: str) -> str:
-        base = self.cfg.gemini_base_url or DEFAULT_GEMINI_BASE
-        return f"{base}/v1beta/models/{model}:generateContent"
+        return f"{self._gemini_root}/v1beta/models/{model}:generateContent"
 
     def _gemini_headers(self) -> dict:
         h = {"x-goog-api-key": self.cfg.gemini_api_key}
-        if (self.cfg.gemini_base_url or DEFAULT_GEMINI_BASE) != DEFAULT_GEMINI_BASE:
+        if not self._is_google:
             # посредники обычно ждут ключ как Bearer-токен
             h["Authorization"] = f"Bearer {self.cfg.gemini_api_key}"
         return h
 
     def _openai_url(self, path: str) -> str:
-        return f"{self.cfg.openai_base_url}/{path}"
+        return f"{_root(self.cfg.openai_base_url)}/v1/{path}"
+
+    def _gemini_native(self, body: dict, model: str, timeout: int = 120) -> dict:
+        """Запрос к Gemini в формате Google. При auto, если посредник этот формат
+        не понимает, помечает Gemini как работающий в формате OpenAI."""
+        try:
+            data = _post(self._gemini_url(model), headers=self._gemini_headers(), json=body, timeout=timeout)
+        except AIHTTPError as e:
+            if self.gemini_style is None and not self._is_google and e.status in ROUTE_MISMATCH \
+                    and "api key" not in str(e).lower():
+                self.gemini_style = "openai"
+                raise _SwitchToOpenAI() from None
+            raise
+        if self.gemini_style is None:
+            self.gemini_style = "native"
+        return data
 
     # ------------------------------------------------------------- текст
     def json(self, system: str, prompt: str, images: list[str | Path] | None = None,
@@ -130,31 +176,45 @@ class AI:
         raise AIError("; ".join(errors) or "не задан ни GEMINI_API_KEY, ни OPENAI_API_KEY")
 
     def _gemini_json(self, system, prompt, images, temperature):
+        if self.gemini_style == "openai":
+            return self._chat_json(f"{self._gemini_root}/v1/chat/completions", self.cfg.gemini_api_key,
+                                   self.cfg.gemini_text_model, system, prompt, images, temperature)
         parts = [{"text": prompt}] + [_image_part(p) for p in images]
         body = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"temperature": temperature, "responseMimeType": "application/json"},
         }
-        data = _post(self._gemini_url(self.cfg.gemini_text_model),
-                     headers=self._gemini_headers(), json=body)
+        try:
+            data = self._gemini_native(body, self.cfg.gemini_text_model)
+        except _SwitchToOpenAI:
+            return self._gemini_json(system, prompt, images, temperature)
         text = "".join(p.get("text", "") for p in _gemini_parts(data))
         return parse_json(text)
 
     def _openai_json(self, system, prompt, images, temperature):
+        return self._chat_json(self._openai_url("chat/completions"), self.cfg.openai_api_key,
+                               self.cfg.openai_text_model, system, prompt, images, temperature)
+
+    @staticmethod
+    def _chat_json(url, key, model, system, prompt, images, temperature):
+        """Запрос в формате OpenAI Chat Completions (его понимают и многие посредники)."""
         content: list[dict] = [{"type": "text", "text": prompt}]
         for p in images:
             part = _image_part(p)["inlineData"]
             content.append({"type": "image_url",
                             "image_url": {"url": f"data:{part['mimeType']};base64,{part['data']}"}})
         body = {
-            "model": self.cfg.openai_text_model,
+            "model": model,
             "temperature": temperature,
             "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
         }
-        data = _post(self._openai_url("chat/completions"), headers={"Authorization": f"Bearer {self.cfg.openai_api_key}"}, json=body)
-        return parse_json(data["choices"][0]["message"]["content"])
+        data = _post(url, headers={"Authorization": f"Bearer {key}"}, json=body)
+        try:
+            return parse_json(data["choices"][0]["message"]["content"])
+        except (KeyError, IndexError, TypeError):
+            raise AIError(f"неожиданный ответ: {str(data)[:200]}") from None
 
     def research(self, system: str, prompt: str, temperature: float = 0.4) -> tuple[dict | list, list[dict]]:
         """Запрос к Gemini с поиском Google. Возвращает (JSON из ответа, источники).
@@ -164,14 +224,19 @@ class AI:
         """
         if not self.cfg.gemini_api_key:
             raise AIError("для разведки трендов нужен GEMINI_API_KEY (поиск Google есть только у Gemini)")
+        if self.gemini_style == "openai":
+            raise AIError("посредник Gemini принимает запросы только в формате OpenAI, а поиск Google "
+                          "доступен лишь в формате Google — разведка трендов через этот адрес недоступна")
         body = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "tools": [{"google_search": {}}],
             "generationConfig": {"temperature": temperature},
         }
-        data = _post(self._gemini_url(self.cfg.gemini_text_model),
-                     headers=self._gemini_headers(), json=body, timeout=180)
+        try:
+            data = self._gemini_native(body, self.cfg.gemini_text_model, timeout=180)
+        except _SwitchToOpenAI:
+            return self.research(system, prompt, temperature)
         text = "".join(p.get("text", "") for p in _gemini_parts(data))
         meta = (data.get("candidates") or [{}])[0].get("groundingMetadata") or {}
         sources, seen = [], set()
@@ -199,7 +264,10 @@ class AI:
                 continue
             try:
                 fn(*probe, [], 0.0)
-                out.append(f"✅ {name}: отвечает (модель {model}, {host})")
+                fmt = ""
+                if name == "Gemini" and not self._is_google:
+                    fmt = ", формат " + ("Google" if self.gemini_style == "native" else "OpenAI")
+                out.append(f"✅ {name}: отвечает (модель {model}, {host}{fmt})")
             except (AIError, KeyError, ValueError) as e:
                 out.append(f"❌ {name} (модель {model}, {host}): {str(e)[:300]}")
         return out
@@ -222,13 +290,17 @@ class AI:
         raise AIError("; ".join(errors) or "не задан ни GEMINI_API_KEY, ни OPENAI_API_KEY")
 
     def _gemini_image(self, prompt, refs):
+        if self.gemini_style == "openai":
+            raise AIError("генерация картинок Gemini через посредника в формате OpenAI не поддерживается")
         parts = [_image_part(p) for p in refs] + [{"text": prompt}]
         body = {
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": "9:16"}},
         }
-        data = _post(self._gemini_url(self.cfg.gemini_image_model),
-                     headers=self._gemini_headers(), json=body, timeout=180)
+        try:
+            data = self._gemini_native(body, self.cfg.gemini_image_model, timeout=180)
+        except _SwitchToOpenAI:
+            return self._gemini_image(prompt, refs)
         for p in _gemini_parts(data):
             inline = p.get("inlineData") or p.get("inline_data")
             if inline and inline.get("data"):
@@ -256,6 +328,10 @@ class AI:
         if not item.get("b64_json"):
             raise AIRefused("OpenAI не вернул изображение")
         return ImageResult(base64.b64decode(item["b64_json"]), "image/png", "openai")
+
+
+class _SwitchToOpenAI(Exception):
+    """Внутренний сигнал: повторить запрос к Gemini в формате OpenAI."""
 
 
 def _gemini_parts(data: dict) -> list[dict]:

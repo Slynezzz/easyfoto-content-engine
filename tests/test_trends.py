@@ -239,3 +239,74 @@ class AIProviderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProxyStyleTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = Config(data_dir=Path(tempfile.mkdtemp()), gemini_api_key="sk-cvc-x",
+                          gemini_base_url="https://proxy.example/", openai_api_key="sk-star-y",
+                          openai_base_url="https://ai.example/v1")
+
+    def test_switches_to_openai_format_when_native_route_missing(self):
+        calls = []
+
+        def post(url, timeout=None, **kw):
+            calls.append((url, kw.get("headers", {})))
+            if ":generateContent" in url:
+                return Resp(404, {"error": {"message": "Invalid URL (POST /v1beta/models/...)"}})
+            return Resp(200, {"choices": [{"message": {"content": '{"ok": true}'}}]})
+        ai = AI(self.cfg)
+        with mock.patch("engine.llm.requests.post", side_effect=post):
+            self.assertEqual(ai.json("s", "p"), {"ok": True})
+            self.assertEqual(ai.json("s", "p"), {"ok": True})
+        self.assertEqual(ai.gemini_style, "openai")
+        self.assertEqual(calls[1][0], "https://proxy.example/v1/chat/completions")
+        self.assertEqual(calls[1][1]["Authorization"], "Bearer sk-cvc-x")
+        # второй запрос сразу в формате OpenAI, без повторной пробы формата Google
+        self.assertEqual(sum(1 for u, _ in calls if ":generateContent" in u), 1)
+
+    def test_native_proxy_is_remembered_and_gets_both_auth_headers(self):
+        ok = {"candidates": [{"content": {"parts": [{"text": '{"ok": 1}'}]}}]}
+        with mock.patch("engine.llm.requests.post", return_value=Resp(200, ok)) as post:
+            AI_ = AI(self.cfg)
+            AI_.json("s", "p")
+        self.assertEqual(AI_.gemini_style, "native")
+        url = post.call_args.args[0]
+        headers = post.call_args.kwargs["headers"]
+        self.assertEqual(url, "https://proxy.example/v1beta/models/gemini-2.5-flash:generateContent")
+        self.assertEqual(headers["Authorization"], "Bearer sk-cvc-x")
+        self.assertEqual(headers["x-goog-api-key"], "sk-cvc-x")
+
+    def test_invalid_key_is_not_mistaken_for_wrong_format(self):
+        err = Resp(400, {"error": {"message": "API key not valid. Please pass a valid API key."}})
+        ai = AI(self.cfg)
+        self.cfg.openai_api_key = ""
+        with mock.patch("engine.llm.requests.post", return_value=err):
+            with self.assertRaises(AIError):
+                ai.json("s", "p")
+        self.assertIsNone(ai.gemini_style)
+
+    def test_openai_base_url_with_or_without_v1(self):
+        for base in ("https://ai.example/v1", "https://ai.example", "https://ai.example/v1/"):
+            self.cfg.openai_base_url = base
+            self.assertEqual(AI(self.cfg)._openai_url("chat/completions"),
+                             "https://ai.example/v1/chat/completions")
+
+    def test_html_page_instead_of_api_is_reported_clearly(self):
+        class Html:
+            status_code, text = 200, "<html>Магазин ключей</html>"
+
+            def json(self):
+                raise ValueError("no json")
+        self.cfg.openai_api_key = ""
+        self.cfg.gemini_api_style = "native"
+        with mock.patch("engine.llm.requests.post", return_value=Html()):
+            with self.assertRaises(AIError) as ctx:
+                AI(self.cfg).json("s", "p")
+        self.assertIn("не JSON", str(ctx.exception))
+
+    def test_research_unavailable_in_openai_format(self):
+        self.cfg.gemini_api_style = "openai"
+        with self.assertRaises(AIError) as ctx:
+            AI(self.cfg).research("s", "p")
+        self.assertIn("поиск Google", str(ctx.exception))

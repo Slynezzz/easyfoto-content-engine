@@ -35,6 +35,8 @@ class Config:
         "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/"))
     openai_base_url: str = field(default_factory=lambda: _env(
         "OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"))
+    # Формат запросов к Gemini-посреднику: auto (определить самому), native (как у Google), openai
+    gemini_api_style: str = field(default_factory=lambda: _env("GEMINI_API_STYLE", "auto"))
     gemini_text_model: str = field(default_factory=lambda: _env("GEMINI_TEXT_MODEL", "gemini-2.5-flash"))
     gemini_image_model: str = field(default_factory=lambda: _env("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"))
     openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY"))
