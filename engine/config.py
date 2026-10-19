@@ -47,6 +47,13 @@ class Config:
     google_api_key: str = field(default_factory=lambda: _env("GOOGLE_API_KEY"))
     google_cse_cx: str = field(default_factory=lambda: _env("GOOGLE_CSE_CX"))
     google_research_model: str = field(default_factory=lambda: _env("GOOGLE_RESEARCH_MODEL", "gemini-2.5-flash"))
+    # Отдельный сервис поиска: tavily | serper | brave | google_cse | perplexity (модель, которая ищет сама)
+    search_provider: str = field(default_factory=lambda: _env("SEARCH_PROVIDER"))
+    search_api_key: str = field(default_factory=lambda: _env("SEARCH_API_KEY"))
+    search_base_url: str = field(default_factory=lambda: _env("SEARCH_BASE_URL").rstrip("/"))
+    search_model: str = field(default_factory=lambda: _env("SEARCH_MODEL", "sonar"))
+    # Если поиск не настроен или упал — всё равно предложить идеи хуков (с честной пометкой «без поиска»)
+    trends_without_search: bool = field(default_factory=lambda: _env("TRENDS_WITHOUT_SEARCH", "1") not in ("0", "false", "no"))
 
     # --- откуда брать фото для роликов: library (готовые), generate (новые), mixed
     image_source: str = field(default_factory=lambda: _env("IMAGE_SOURCE", "library"))

@@ -402,10 +402,15 @@ class AI:
                 out.append(f"✅ {name}: отвечает (модель {used}, {host}{fmt}{auto})")
             except (AIError, KeyError, ValueError) as e:
                 out.append(f"❌ {name} (модель {model}, {host}): {str(e)[:300]}")
+        provider = (getattr(self.cfg, "search_provider", "") or "").lower()
         cse = bool(getattr(self.cfg, "google_api_key", "") and getattr(self.cfg, "google_cse_cx", ""))
-        out.append("Поиск для разведки трендов: " + (
-            "ключ и поисковик Google заданы (проверка — командой /trends)" if cse
-            else "не настроен — задай GOOGLE_API_KEY и GOOGLE_CSE_CX"))
+        if provider and provider != "none":
+            line = f"{provider} (ключ {'задан' if getattr(self.cfg, 'search_api_key', '') else 'НЕ задан'})"
+        elif cse:
+            line = "поисковик Google (GOOGLE_API_KEY + GOOGLE_CSE_CX)"
+        else:
+            line = "не настроен — разведка даёт только идеи без поиска; задай SEARCH_PROVIDER и SEARCH_API_KEY"
+        out.append(f"Поиск для разведки трендов: {line}. Проверка — /trends")
         return out
 
     # ---------------------------------------------------------- картинки
