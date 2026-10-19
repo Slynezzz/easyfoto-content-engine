@@ -249,7 +249,6 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
 
         bot = AdminBot(cfg, db, TelegramAPI(cfg.admin_bot_token), run_bg=run_bg, services=Services(
             make_one=engine.make_one,
-            publish_now=engine.publish,
             instagram_ready=ig.ready,
             run_analysis=lambda: analyst.run(cfg, db, ai),
             stats_text=lambda: analyst.stats_text(db),

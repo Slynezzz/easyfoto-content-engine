@@ -76,8 +76,6 @@ class AdminBotTests(unittest.TestCase):
         self.made = []
         self.bot = AdminBot(self.cfg, self.db, self.api, Services(
             make_one=self._make_one,
-            publish_now=lambda pid: (self.published.append(pid),
-                                     self.db.update_post(pid, status="published"), "🚀 готово")[2],
             instagram_ready=lambda: self.ig_ready,
             run_analysis=lambda: "analysis",
             stats_text=lambda: "stats",
@@ -139,11 +137,25 @@ class AdminBotTests(unittest.TestCase):
         self.bot.handle(cb(f"ok:{pid}"))  # двойное нажатие
         self.assertIn("Уже обработан", [k["text"] for m, k in self.api.sent if m == "answer"])
 
-    def test_publish_now(self):
+    def test_publish_now_hands_over_to_scheduler(self):
+        pid = self._post(scheduled="2026-12-31 19:00")
+        self.bot.handle(cb(f"now:{pid}"))
+        post = self.db.post(pid)
+        self.assertEqual(post["status"], "approved")
+        self.assertNotEqual(post["scheduled_for"], "2026-12-31 19:00")  # перенесён на «сейчас»
+        self.assertIn("⏳ Публикуется…", [k["label"] for m, k in self.api.sent if m == "markup"])
+
+    def test_publish_now_respects_pause(self):
+        self.db.set("paused", "1")
         pid = self._post()
         self.bot.handle(cb(f"now:{pid}"))
-        self.assertEqual(self.published, [pid])
-        self.assertIn("🚀 Опубликовано", [k["label"] for m, k in self.api.sent if m == "markup"])
+        self.assertIn("✅ Выйдет после /resume", [k["label"] for m, k in self.api.sent if m == "markup"])
+
+    def test_retry_failed_post(self):
+        pid = self._post(status="failed")
+        self.bot.handle(cb(f"retry:{pid}"))
+        self.assertEqual(self.db.post(pid)["status"], "approved")
+        self.assertIsNotNone(self.db.post(pid)["scheduled_for"])
 
     def test_manual_mode_when_instagram_not_connected(self):
         self.ig_ready = False

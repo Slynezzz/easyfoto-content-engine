@@ -149,6 +149,41 @@ class InstagramTests(unittest.TestCase):
             self.ig.insights("MEDIA2")
         self.assertEqual(sum(1 for c in g.calls if c[1].endswith("/insights")), 1)
 
+    def test_deleted_reel_does_not_disable_metrics(self):
+        g = FakeGraph()
+        g.get = lambda url, params=None, timeout=None: Resp(
+            {"error": {"message": "Object does not exist", "code": 100}})
+        with self._patch(g):
+            with self.assertRaises(IGError):
+                self.ig.insights("DELETED")
+        self.assertFalse(self.db.get("ig_bad_metrics"))
+        with self._patch(FakeGraph()):
+            self.assertEqual(self.ig.insights("MEDIA1")["plays"], 7)
+
+    def test_bad_metric_list_expires(self):
+        self.db.set("ig_bad_metrics", "views")
+        self.db.set("ig_bad_metrics_at", "2020-01-01T00:00:00+00:00")
+        self.assertEqual(self.ig._bad_metrics(), set())
+
+    def test_new_env_token_beats_stale_refreshed_one(self):
+        with self._patch(FakeGraph()):
+            self.ig.refresh_token()
+        self.assertEqual(self.ig.token, "NEW")
+        self.cfg.ig_access_token = "FRESH_FROM_OWNER"
+        self.assertEqual(self.ig.token, "FRESH_FROM_OWNER")
+
+    def test_already_published_container_is_matched_by_caption(self):
+        self.db.update_post(self.pid, ig_container_id="CONTAINER1")
+        g = FakeGraph(statuses=["PUBLISHED"])
+        orig = g.get
+        g.get = lambda url, params=None, timeout=None: (
+            Resp({"data": [{"id": "OTHER", "caption": "чужой"}, {"id": "MEDIA9", "caption": "Текст  #тег"}]})
+            if url.endswith("17841400000/media") else orig(url, params, timeout))
+        with self._patch(g):
+            self.ig.publish(self.pid)
+        self.assertEqual(self.db.post(self.pid)["ig_media_id"], "MEDIA9")
+        self.assertFalse(any(c[1].endswith("/media_publish") for c in g.calls))
+
     def test_insights_fall_back_to_single_metrics(self):
         with self._patch(FakeGraph(fail_metric="reels_skip_rate")):
             m = self.ig.insights("MEDIA1")

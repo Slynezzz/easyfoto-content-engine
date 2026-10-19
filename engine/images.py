@@ -160,14 +160,20 @@ def generate(cfg: Config, db: DB, ai: AI, scene: dict, theme: str) -> int:
     work = cfg.data_dir / "work" / uuid.uuid4().hex[:8]
     work.mkdir(parents=True, exist_ok=True)
     small = []
-    for i, ref in enumerate(refs):
-        dst = work / f"ref{i}.jpg"
-        dst.write_bytes(_thumb(ref, 1536))
-        small.append(dst)
     try:
+        for i, ref in enumerate(refs):
+            dst = work / f"ref{i}.jpg"
+            try:
+                dst.write_bytes(_thumb(ref, 1536))
+            except OSError as e:  # битый файл — пропускаем, остальные референсы работают
+                log.warning("референс %s не читается: %s", ref, e)
+                continue
+            small.append(dst)
+        if not small:
+            raise AIError("ни один референс не читается — пришли их заново")
         res = ai.image(prompt, small)
     finally:
-        for f in small:
+        for f in work.glob("*"):
             f.unlink(missing_ok=True)
         work.rmdir()
     im = Image.open(io.BytesIO(res.data)).convert("RGB")

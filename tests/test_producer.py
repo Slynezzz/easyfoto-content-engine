@@ -114,6 +114,19 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(len(plan["script"]["captions"]), n_ok)
         self.assertTrue(all(c.startswith("Сцена") for c in plan["script"]["captions"]))
 
+    def test_corrupt_reference_is_skipped(self):
+        self.cfg.image_source = "generate"
+        self._fill("refs", 2)
+        (self.cfg.assets_dir / "refs" / "broken.jpg").write_bytes(b"not an image")
+        images.scan(self.cfg, self.db)
+        buf = io.BytesIO()
+        from PIL import Image
+        Image.new("RGB", (768, 1344)).save(buf, "JPEG")
+        ai = FakeAI(buf.getvalue())
+        aid = images.generate(self.cfg, self.db, ai, {"title": "x", "where": "y"}, "cinema")
+        self.assertTrue(aid)
+        self.assertEqual(list((self.cfg.data_dir / "work").glob("*")), [])
+
     def test_generate_requires_refs(self):
         self.cfg.image_source = "generate"
         ai = FakeAI(b"")

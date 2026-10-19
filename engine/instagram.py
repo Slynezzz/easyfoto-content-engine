@@ -37,7 +37,10 @@ class Instagram:
     @property
     def token(self) -> str:
         # Обновлённый токен хранится в базе и важнее исходного из переменных.
-        return self.db.get("ig_token") or self.cfg.ig_access_token
+        # Если владелец вписал в переменные новый токен, старый продлённый не должен его перебивать.
+        if self.db.get("ig_token") and self.db.get("ig_token_src") == self.cfg.ig_access_token:
+            return self.db.get("ig_token")
+        return self.cfg.ig_access_token
 
     def ready(self) -> bool:
         return bool(self.cfg.ig_user_id and self.token and self.cfg.public_base_url)
@@ -73,6 +76,7 @@ class Instagram:
             log.error("token refresh failed: %s", data.get("error"))
             return False
         self.db.set("ig_token", data["access_token"])
+        self.db.set("ig_token_src", self.cfg.ig_access_token)
         self.db.set("ig_token_refreshed_at", now_iso())
         return True
 
@@ -135,7 +139,11 @@ class Instagram:
             if status in ("ERROR", "EXPIRED"):
                 raise IGError(f"Instagram не принял видео: {status}")
             if status == "PUBLISHED":
-                raise IGError("контейнер уже опубликован, но id ролика не сохранён — проверь профиль вручную")
+                media_id = self._find_published(post["caption"] or "")
+                if not media_id:
+                    raise IGError("контейнер уже опубликован, но ролик в профиле не найден — проверь вручную")
+                self.db.update_post(post_id, ig_media_id=media_id, published_at=now_iso())
+                return media_id
             if waited >= max_wait_s:
                 raise IGError("Instagram слишком долго обрабатывает видео")
             self.sleep(poll_s)
@@ -148,23 +156,37 @@ class Instagram:
         self.db.update_post(post_id, ig_media_id=media_id, published_at=now_iso())
         return media_id
 
+    def _find_published(self, caption: str) -> str | None:
+        """Ищет среди последних роликов профиля тот, что с нашим текстом."""
+        items = self._req("GET", f"{self.cfg.ig_user_id}/media", fields="id,caption", limit=15).get("data", [])
+        want = " ".join(caption.split())
+        for it in items:
+            if " ".join((it.get("caption") or "").split()) == want:
+                return it.get("id")
+        return None
+
     # ----------------------------------------------------------- insights
     def insights(self, media_id: str) -> dict[str, int | float | None]:
         """Метрики ролика. Если какая-то метрика не поддерживается, запрашивает по одной."""
-        bad = set(filter(None, (self.db.get("ig_bad_metrics") or "").split(",")))
+        bad = self._bad_metrics()
         metrics = [m for m in METRICS if m not in bad]
         try:
             data = self._req("GET", f"{media_id}/insights", metric=",".join(metrics)).get("data", [])
         except IGError:
-            data = []
+            data, failed = [], []
             for m in metrics:
                 try:
                     data += self._req("GET", f"{media_id}/insights", metric=m).get("data", [])
                 except IGError as e:
-                    if "code 100" in str(e):  # метрика не поддерживается — больше не спрашиваем
-                        bad.add(m)
+                    failed.append(m)
                     log.debug("metric %s unavailable: %s", m, e)
-            self.db.set("ig_bad_metrics", ",".join(sorted(bad)))
+            if not data:
+                # Не пришла ни одна метрика — проблема в самом ролике (удалён) или в доступе,
+                # а не в метриках. Ничего не запоминаем.
+                raise IGError(f"нет статистики по ролику {media_id}")
+            if failed:
+                self.db.set("ig_bad_metrics", ",".join(sorted(bad | set(failed))))
+                self.db.set("ig_bad_metrics_at", now_iso())
         raw = {d["name"]: (d.get("values") or [{}])[0].get("value") for d in data}
         return {
             "plays": raw.get("views"), "reach": raw.get("reach"), "likes": raw.get("likes"),
@@ -173,6 +195,13 @@ class Instagram:
             "total_watch_ms": raw.get("ig_reels_video_view_total_time"),
             "skip_rate": raw.get("reels_skip_rate"),
         }
+
+    def _bad_metrics(self) -> set[str]:
+        """Метрики, которые API отверг. Список забывается через 7 дней: Meta может их вернуть."""
+        at = self.db.get("ig_bad_metrics_at")
+        if not at or datetime.now(timezone.utc) - datetime.fromisoformat(at) > timedelta(days=7):
+            return set()
+        return set(filter(None, (self.db.get("ig_bad_metrics") or "").split(",")))
 
     def collect_all(self, max_age_days: int = 30) -> int:
         """Снимает метрики со всех опубликованных за max_age_days роликов."""

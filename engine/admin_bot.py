@@ -9,8 +9,10 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from . import images
 from .config import Config
@@ -41,7 +43,6 @@ HELP = """Команды:
 class Services:
     """Действия, которые бот вызывает у остальной системы."""
     make_one: Callable[[], int]
-    publish_now: Callable[[int], str]
     instagram_ready: Callable[[], bool]
     run_analysis: Callable[[], str]
     stats_text: Callable[[], str]
@@ -99,12 +100,17 @@ class AdminBot:
             self.say(f"⚠️ Не получилось собрать ролик: {e}")
             return None
 
-    def _publish(self, post_id: int, mark: Callable[[str], None]) -> None:
-        result = self.s.publish_now(post_id)  # об ошибке с кнопкой повтора сообщает сам publish_now
-        ok = self.db.post(post_id)["status"] == "published"
-        mark("🚀 Опубликовано" if ok else "⚠️ Ошибка")
-        if ok and result:
-            self.say(result)
+    def _publish_asap(self, cq: dict, post_id: int, mark: Callable[[str], None]) -> None:
+        """Ставит одобренный ролик на текущее время. Публикует его планировщик —
+        он единственный, кто публикует, поэтому двойной публикации не бывает."""
+        now = datetime.now(ZoneInfo(self.cfg.timezone)).strftime("%Y-%m-%d %H:%M")
+        self.db.update_post(post_id, scheduled_for=now)
+        if self.paused:
+            self.api.answer_callback(cq["id"], "Автопубликация на паузе")
+            mark("✅ Выйдет после /resume")
+            return
+        self.api.answer_callback(cq["id"], "Опубликую в течение минуты")
+        mark("⏳ Публикуется…")
 
     @property
     def paused(self) -> bool:
@@ -305,18 +311,14 @@ class AdminBot:
                 self.api.answer_callback(cq["id"], "В очереди на публикацию")
                 mark("✅ В расписании")
                 return
-            self.api.answer_callback(cq["id"], "Публикую…")
-            mark("⏳ Публикуется…")
-            self.run_bg(lambda: self._publish(post_id, mark))
+            self._publish_asap(cq, post_id, mark)
             return
 
         if action == "retry":
             if not self.db.claim_post(post_id, "failed", "approved"):
                 self.api.answer_callback(cq["id"], "Уже обработан")
                 return
-            self.api.answer_callback(cq["id"], "Публикую повторно…")
-            mark("⏳ Публикуется…")
-            self.run_bg(lambda: self._publish(post_id, mark))
+            self._publish_asap(cq, post_id, mark)
             return
 
         if action in ("no", "redo"):
