@@ -69,6 +69,11 @@ class Plan:
         return cls(**json.loads(s))
 
 
+def theme_info(pb: dict, theme: str) -> dict:
+    """Описание темы; для смешанной подборки — общее."""
+    return pb["themes"].get(theme) or {"title": "разные образы", "scenes": []}
+
+
 def _clip(text: str, limit: int) -> str:
     text = " ".join(str(text or "").split())
     if len(text) <= limit:
@@ -81,11 +86,11 @@ def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None
                  generate_scenes: bool, gender: str) -> str:
     fmt = pb["formats"][choice.format]
     hook = pb["hooks"][choice.hook_id]
-    theme = pb["themes"][choice.theme]
+    theme = theme_info(pb, choice.theme)
     lines = [
         f"Формат ролика: {choice.format} — {fmt['about']}.",
         f"Паттерн хука: «{hook['pattern']}» (идея: {hook['idea']}). Перепиши своими словами под тему, сохрани механику.",
-        f"Тема кадров: {theme['title']}. Примеры сцен темы: {'; '.join(theme['scenes'])}.",
+        f"Тема кадров: {theme['title']}." + (f" Примеры сцен темы: {'; '.join(theme['scenes'])}." if theme["scenes"] else ""),
         f"Кадров в ролике: {n}.",
         f"Автор: {'мужчина' if gender == 'male' else 'женщина'}, говорит от первого лица.",
     ]
@@ -133,8 +138,8 @@ def validate(raw: dict, choice: Choice, pb: dict, n: int, generate_scenes: bool)
 
 def fallback(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None, bot: str) -> Plan:
     """Шаблонный сценарий без нейросети — чтобы конвейер не вставал."""
-    theme = pb["themes"][choice.theme]
-    notes = photo_notes or theme["scenes"]
+    theme = theme_info(pb, choice.theme)
+    notes = photo_notes or theme["scenes"] or ["Новый образ"]
     captions = [_clip(x, LIMITS["caption"]) for x in (notes * n)[:n]]
     caption = (f"{pb['hooks'][choice.hook_id]['pattern']}.\n\n"
                f"Все кадры — мои, сделаны ботом @{bot} из обычных селфи. "

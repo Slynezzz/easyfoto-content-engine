@@ -73,11 +73,9 @@ class VideoSpec:
 
 def _load(img: Image.Image | str | Path) -> Image.Image:
     if isinstance(img, Image.Image):
-        im = img
-    else:
-        im = Image.open(img)
-    im = ImageOps.exif_transpose(im)
-    return im.convert("RGB")
+        return ImageOps.exif_transpose(img).convert("RGB")
+    with Image.open(img) as im:
+        return ImageOps.exif_transpose(im).convert("RGB")
 
 
 def _prepare(seg: Segment) -> Image.Image:
@@ -300,6 +298,7 @@ def render(spec: VideoSpec, out_path: str | Path, cover_path: str | Path | None 
     except BrokenPipeError:
         pass
     err = proc.stderr.read().decode(errors="replace")
+    proc.stderr.close()
     if proc.wait() != 0:
         raise RuntimeError(f"ffmpeg завершился с ошибкой: {err.strip()}")
     if cover_path and not cover_saved:

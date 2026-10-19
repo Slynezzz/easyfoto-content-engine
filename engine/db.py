@@ -81,6 +81,10 @@ class DB:
         self._lock = threading.RLock()
         self._conn.executescript(SCHEMA)
 
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
