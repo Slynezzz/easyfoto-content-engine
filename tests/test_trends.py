@@ -197,6 +197,32 @@ class AIProviderTests(unittest.TestCase):
         self.assertEqual(res["summary"], "ok")
         self.assertEqual([s["title"] for s in sources], ["a.ru", "b.ru"])
 
+    def test_custom_base_urls_for_proxy_services(self):
+        self.cfg.gemini_base_url = "https://proxy.example.ru/google"
+        self.cfg.openai_base_url = "https://proxy.example.ru/openai/v1"
+        self.cfg.openai_api_key = "sk-star-xyz"
+        ok = Resp(200, {"candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}],
+                        "choices": [{"message": {"content": '{"ok": true}'}}]})
+        with mock.patch("engine.llm.requests.post", return_value=ok) as post:
+            lines = AI(self.cfg).check()
+        urls = [c.args[0] for c in post.call_args_list]
+        self.assertEqual(urls[0], "https://proxy.example.ru/google/v1beta/models/gemini-2.5-flash:generateContent")
+        self.assertEqual(urls[1], "https://proxy.example.ru/openai/v1/chat/completions")
+        self.assertEqual(post.call_args_list[0].kwargs["headers"]["Authorization"], "Bearer g")
+        self.assertTrue(all(l.startswith("✅") for l in lines))
+        self.assertIn("proxy.example.ru", lines[0])
+
+    def test_errors_are_short(self):
+        err = Resp(400, {"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.",
+                                   "details": [{"reason": "API_KEY_INVALID"}] * 5}})
+        with mock.patch("engine.llm.requests.post", return_value=err):
+            line = AI(self.cfg).check()[0]
+        self.assertTrue(line.endswith("API key not valid. Please pass a valid API key."))
+
+    def test_quotes_around_keys_are_ignored(self):
+        with mock.patch.dict("os.environ", {"GEMINI_API_KEY": ' "AIzaKEY" '}):
+            self.assertEqual(Config().gemini_api_key, "AIzaKEY")
+
     def test_research_requires_gemini(self):
         self.cfg.gemini_api_key = ""
         with self.assertRaises(AIError):

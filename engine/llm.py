@@ -20,9 +20,7 @@ from .config import Config
 
 log = logging.getLogger(__name__)
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
-OPENAI_EDITS_URL = "https://api.openai.com/v1/images/edits"
+DEFAULT_GEMINI_BASE = "https://generativelanguage.googleapis.com"
 
 
 class AIError(RuntimeError):
@@ -50,13 +48,26 @@ def _post(url: str, *, retries: int = 3, timeout: int = 120, **kw) -> dict:
         else:
             if r.status_code == 200:
                 return r.json()
-            body = r.text[:500]
+            body = _error_text(r)
             if r.status_code in (429, 500, 502, 503, 504):
                 last = AIError(f"HTTP {r.status_code}: {body}")
             else:
                 raise AIError(f"HTTP {r.status_code}: {body}")
         time.sleep(2 * (attempt + 1))
     raise AIError(f"не удалось после {retries} попыток: {last}")
+
+
+def _error_text(r) -> str:
+    """Из ответа с ошибкой берём только суть: message из JSON, а не весь ответ."""
+    try:
+        err = r.json().get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])[:300]
+        if isinstance(err, str):
+            return err[:300]
+    except ValueError:
+        pass
+    return r.text[:300]
 
 
 def _image_part(path: str | Path) -> dict:
@@ -85,6 +96,21 @@ class AI:
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
+    # ------------------------------------------------------------ адреса
+    def _gemini_url(self, model: str) -> str:
+        base = self.cfg.gemini_base_url or DEFAULT_GEMINI_BASE
+        return f"{base}/v1beta/models/{model}:generateContent"
+
+    def _gemini_headers(self) -> dict:
+        h = {"x-goog-api-key": self.cfg.gemini_api_key}
+        if (self.cfg.gemini_base_url or DEFAULT_GEMINI_BASE) != DEFAULT_GEMINI_BASE:
+            # посредники обычно ждут ключ как Bearer-токен
+            h["Authorization"] = f"Bearer {self.cfg.gemini_api_key}"
+        return h
+
+    def _openai_url(self, path: str) -> str:
+        return f"{self.cfg.openai_base_url}/{path}"
+
     # ------------------------------------------------------------- текст
     def json(self, system: str, prompt: str, images: list[str | Path] | None = None,
              temperature: float = 0.9) -> dict | list:
@@ -110,8 +136,8 @@ class AI:
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"temperature": temperature, "responseMimeType": "application/json"},
         }
-        data = _post(GEMINI_URL.format(model=self.cfg.gemini_text_model),
-                     headers={"x-goog-api-key": self.cfg.gemini_api_key}, json=body)
+        data = _post(self._gemini_url(self.cfg.gemini_text_model),
+                     headers=self._gemini_headers(), json=body)
         text = "".join(p.get("text", "") for p in _gemini_parts(data))
         return parse_json(text)
 
@@ -127,7 +153,7 @@ class AI:
             "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
         }
-        data = _post(OPENAI_CHAT_URL, headers={"Authorization": f"Bearer {self.cfg.openai_api_key}"}, json=body)
+        data = _post(self._openai_url("chat/completions"), headers={"Authorization": f"Bearer {self.cfg.openai_api_key}"}, json=body)
         return parse_json(data["choices"][0]["message"]["content"])
 
     def research(self, system: str, prompt: str, temperature: float = 0.4) -> tuple[dict | list, list[dict]]:
@@ -144,8 +170,8 @@ class AI:
             "tools": [{"google_search": {}}],
             "generationConfig": {"temperature": temperature},
         }
-        data = _post(GEMINI_URL.format(model=self.cfg.gemini_text_model),
-                     headers={"x-goog-api-key": self.cfg.gemini_api_key}, json=body, timeout=180)
+        data = _post(self._gemini_url(self.cfg.gemini_text_model),
+                     headers=self._gemini_headers(), json=body, timeout=180)
         text = "".join(p.get("text", "") for p in _gemini_parts(data))
         meta = (data.get("candidates") or [{}])[0].get("groundingMetadata") or {}
         sources, seen = [], set()
@@ -161,18 +187,21 @@ class AI:
         """Проверка ключей и моделей: по строке на каждого провайдера."""
         out = []
         probe = ('Ответь JSON {"ok": true}', "проверка связи")
-        for name, key, fn, model in (
-            ("Gemini", self.cfg.gemini_api_key, self._gemini_json, self.cfg.gemini_text_model),
-            ("OpenAI", self.cfg.openai_api_key, self._openai_json, self.cfg.openai_text_model),
+        for name, key, fn, model, base in (
+            ("Gemini", self.cfg.gemini_api_key, self._gemini_json, self.cfg.gemini_text_model,
+             self.cfg.gemini_base_url or DEFAULT_GEMINI_BASE),
+            ("OpenAI", self.cfg.openai_api_key, self._openai_json, self.cfg.openai_text_model,
+             self.cfg.openai_base_url),
         ):
+            host = base.split("://", 1)[-1].split("/", 1)[0]
             if not key:
                 out.append(f"{name}: ключ не задан")
                 continue
             try:
                 fn(*probe, [], 0.0)
-                out.append(f"✅ {name}: отвечает (модель {model})")
+                out.append(f"✅ {name}: отвечает (модель {model}, {host})")
             except (AIError, KeyError, ValueError) as e:
-                out.append(f"❌ {name} (модель {model}): {str(e)[:300]}")
+                out.append(f"❌ {name} (модель {model}, {host}): {str(e)[:300]}")
         return out
 
     # ---------------------------------------------------------- картинки
@@ -198,8 +227,8 @@ class AI:
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": "9:16"}},
         }
-        data = _post(GEMINI_URL.format(model=self.cfg.gemini_image_model),
-                     headers={"x-goog-api-key": self.cfg.gemini_api_key}, json=body, timeout=180)
+        data = _post(self._gemini_url(self.cfg.gemini_image_model),
+                     headers=self._gemini_headers(), json=body, timeout=180)
         for p in _gemini_parts(data):
             inline = p.get("inlineData") or p.get("inline_data")
             if inline and inline.get("data"):
@@ -216,13 +245,13 @@ class AI:
                 "quality": "high", "input_fidelity": "high"}
         headers = {"Authorization": f"Bearer {self.cfg.openai_api_key}"}
         try:
-            data = _post(OPENAI_EDITS_URL, timeout=240, headers=headers, data=form, files=files)
+            data = _post(self._openai_url("images/edits"), timeout=240, headers=headers, data=form, files=files)
         except AIError as e:
             # input_fidelity поддерживают не все модели — повторяем без него.
             if "input_fidelity" not in str(e):
                 raise
             form.pop("input_fidelity")
-            data = _post(OPENAI_EDITS_URL, timeout=240, headers=headers, data=form, files=files)
+            data = _post(self._openai_url("images/edits"), timeout=240, headers=headers, data=form, files=files)
         item = (data.get("data") or [{}])[0]
         if not item.get("b64_json"):
             raise AIRefused("OpenAI не вернул изображение")

@@ -34,6 +34,7 @@
 3. Сервис → Settings → Networking → **Generate Domain**. Скопируй адрес вида `https://xxx.up.railway.app`.
 4. Сервис → **Variables** — заполни по образцу `.env.example`. Минимум для старта:
    - `GEMINI_API_KEY` (и/или `OPENAI_API_KEY`) — те же, что у Easyfotobot
+   - если ключи куплены у посредника, а не у Google/OpenAI напрямую, — его адреса в `GEMINI_BASE_URL` и `OPENAI_BASE_URL` (как в настройках Easyfotobot). Проверка — команда `/ai` в админ-боте
    - `ADMIN_BOT_TOKEN` — токен из шага 1
    - `PUBLIC_BASE_URL` — адрес из шага 3
 5. Дождись деплоя, напиши своему админ-боту любое сообщение. Он ответит твоим `chat_id`.
