@@ -40,6 +40,36 @@ class AIHTTPError(AIError):
 # Ответы, по которым видно: адрес не понимает запросы в формате Google.
 ROUTE_MISMATCH = (400, 404, 405, 415, 501)
 
+# Ответы, по которым видно: дело в модели (нет у посредника, временно отключена).
+MODEL_TROUBLE = re.compile(
+    r"unknown model|no such model|invalid model|model_not_found|no available channel|"
+    r"temporarily unavailable|model[^.;]{0,60}(not found|not exist|does not exist|unavailable|"
+    r"not available|not supported|is not supported)", re.I)
+
+# Порядок предпочтения текстовых моделей; дальше — любые подходящие из списка посредника.
+TEXT_PREFS = {
+    "gemini": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-flash-latest",
+               "gemini-3-flash-preview", "gemini-3-flash", "gemini-2.5-pro", "gemini-3-pro-preview"],
+    "openai": ["gpt-4.1-mini", "gpt-4o-mini", "gpt-5-mini", "gpt-4.1", "gpt-4o", "gpt-5",
+               "gpt-4.1-nano", "gpt-5-nano"],
+}
+NOT_TEXT = ("image", "embed", "tts", "audio", "whisper", "dall", "realtime", "transcri", "moderation",
+            "imagen", "veo", "live", "search", "computer", "sora", "speech", "aqa")
+
+
+def rank_text_models(provider: str, ids: list[str]) -> list[str]:
+    """Текстовые модели из списка посредника — в порядке предпочтения."""
+    family = "gemini" if provider == "gemini" else "gpt"
+    usable = [m for m in dict.fromkeys(ids)
+              if family in m.lower() and not any(x in m.lower() for x in NOT_TEXT)]
+    ordered = []
+    for pref in TEXT_PREFS[provider]:
+        ordered += [m for m in usable if (m == pref or m.endswith("/" + pref)) and m not in ordered]
+    # остальное: сначала быстрые и дешёвые (flash, mini), потом прочие
+    rest = sorted((m for m in usable if m not in ordered),
+                  key=lambda m: (not any(x in m.lower() for x in ("flash", "mini")), m))
+    return ordered + rest
+
 
 @dataclass
 class ImageResult:
@@ -119,6 +149,9 @@ class AI:
         # auto — определяется при первом запросе и запоминается до перезапуска.
         style = (getattr(cfg, "gemini_api_style", "") or "auto").lower()
         self.gemini_style: str | None = style if style in ("native", "openai") else None
+        # Рабочие текстовые модели. Если заданная недоступна у посредника, движок сам
+        # подберёт другую из его списка и запомнит её до перезапуска.
+        self.models = {"gemini": cfg.gemini_text_model, "openai": cfg.openai_text_model}
 
     # ------------------------------------------------------------ адреса
     @property
@@ -175,10 +208,53 @@ class AI:
                 errors.append(f"openai: {e}")
         raise AIError("; ".join(errors) or "не задан ни GEMINI_API_KEY, ни OPENAI_API_KEY")
 
+    def _with_model(self, provider: str, call):
+        """Вызывает call(model). Если модель недоступна у посредника — пробует
+        другие из его списка (не больше 4) и запоминает первую рабочую."""
+        current = self.models[provider]
+        try:
+            return call(current)
+        except AIError as e:
+            if not MODEL_TROUBLE.search(str(e)):
+                raise
+            first_error = e
+        try:
+            candidates = [m for m in rank_text_models(provider, self.list_models(provider)) if m != current]
+        except AIError as e:
+            raise AIError(f"{first_error} (список моделей посредника получить не удалось: {e})") from None
+        for model in candidates[:4]:
+            try:
+                result = call(model)
+            except AIError as e:
+                if MODEL_TROUBLE.search(str(e)):
+                    continue
+                raise
+            log.warning("%s: модель %s недоступна, переключился на %s", provider, current, model)
+            self.models[provider] = model
+            return result
+        names = ", ".join(candidates[:6]) or "подходящих нет"
+        raise AIError(f"{first_error}; другие модели посредника тоже не ответили ({names})") from None
+
     def _gemini_json(self, system, prompt, images, temperature):
+        call = lambda m: self._gemini_json_model(m, system, prompt, images, temperature)  # noqa: E731
+        try:
+            return self._with_model("gemini", call)
+        except AIError as e:
+            # Посредник может отдавать модели в формате Google «недоступными», а в формате
+            # OpenAI — рабочими. Если формат ещё не определён, пробуем второй.
+            if self.gemini_style is not None or self._is_google or not MODEL_TROUBLE.search(str(e)):
+                raise
+            self.gemini_style = "openai"
+            try:
+                return self._with_model("gemini", call)
+            except AIError as e2:
+                self.gemini_style = None
+                raise AIError(f"{e}; в формате OpenAI тоже не вышло: {e2}") from None
+
+    def _gemini_json_model(self, model, system, prompt, images, temperature):
         if self.gemini_style == "openai":
             return self._chat_json(f"{self._gemini_root}/v1/chat/completions", self.cfg.gemini_api_key,
-                                   self.cfg.gemini_text_model, system, prompt, images, temperature)
+                                   model, system, prompt, images, temperature)
         parts = [{"text": prompt}] + [_image_part(p) for p in images]
         body = {
             "systemInstruction": {"parts": [{"text": system}]},
@@ -186,15 +262,63 @@ class AI:
             "generationConfig": {"temperature": temperature, "responseMimeType": "application/json"},
         }
         try:
-            data = self._gemini_native(body, self.cfg.gemini_text_model)
+            data = self._gemini_native(body, model)
         except _SwitchToOpenAI:
-            return self._gemini_json(system, prompt, images, temperature)
+            return self._gemini_json_model(model, system, prompt, images, temperature)
         text = "".join(p.get("text", "") for p in _gemini_parts(data))
         return parse_json(text)
 
     def _openai_json(self, system, prompt, images, temperature):
-        return self._chat_json(self._openai_url("chat/completions"), self.cfg.openai_api_key,
-                               self.cfg.openai_text_model, system, prompt, images, temperature)
+        return self._with_model("openai", lambda m: self._chat_json(
+            self._openai_url("chat/completions"), self.cfg.openai_api_key, m, system, prompt, images, temperature))
+
+    # ------------------------------------------------------------ модели
+    def list_models(self, provider: str) -> list[str]:
+        """Модели, которые отдаёт посредник (или сам Google/OpenAI)."""
+        if provider == "openai":
+            urls = [(f"{_root(self.cfg.openai_base_url)}/v1/models",
+                     {"Authorization": f"Bearer {self.cfg.openai_api_key}"})]
+        else:
+            urls = [(f"{self._gemini_root}/v1beta/models", self._gemini_headers()),
+                    (f"{self._gemini_root}/v1/models", {"Authorization": f"Bearer {self.cfg.gemini_api_key}"})]
+            if self.gemini_style == "openai":
+                urls.reverse()
+        last = None
+        for url, headers in urls:
+            try:
+                r = requests.get(url, headers=headers, timeout=30)
+                data = r.json() if r.status_code == 200 else None
+            except (requests.RequestException, ValueError) as e:
+                last = e
+                continue
+            if not isinstance(data, dict):
+                last = f"HTTP {r.status_code}"
+                continue
+            if isinstance(data.get("models"), list):  # формат Google
+                return [m["name"].split("/")[-1] for m in data["models"] if m.get("name")
+                        and "generateContent" in (m.get("supportedGenerationMethods") or ["generateContent"])]
+            if isinstance(data.get("data"), list):    # формат OpenAI
+                return [m["id"] for m in data["data"] if isinstance(m, dict) and m.get("id")]
+            last = "неизвестный формат списка"
+        raise AIError(f"список моделей недоступен: {last}")
+
+    def models_report(self) -> str:
+        lines = []
+        for name, provider, key in (("Gemini", "gemini", self.cfg.gemini_api_key),
+                                    ("OpenAI", "openai", self.cfg.openai_api_key)):
+            if not key:
+                lines.append(f"{name}: ключ не задан")
+                continue
+            try:
+                ids = self.list_models(provider)
+            except AIError as e:
+                lines.append(f"{name}: {e}")
+                continue
+            text = rank_text_models(provider, ids)
+            lines.append(f"{name} — сейчас используется: {self.models[provider]}\n"
+                         f"Текстовые модели посредника ({len(text)}): " + (", ".join(text[:25]) or "не найдено")
+                         + (f"\nВсего моделей: {len(ids)}" if len(ids) != len(text) else ""))
+        return "\n\n".join(lines)
 
     @staticmethod
     def _chat_json(url, key, model, system, prompt, images, temperature):
@@ -234,7 +358,7 @@ class AI:
             "generationConfig": {"temperature": temperature},
         }
         try:
-            data = self._gemini_native(body, self.cfg.gemini_text_model, timeout=180)
+            data = self._gemini_native(body, self.models["gemini"], timeout=180)
         except _SwitchToOpenAI:
             return self.research(system, prompt, temperature)
         text = "".join(p.get("text", "") for p in _gemini_parts(data))
@@ -252,12 +376,12 @@ class AI:
         """Проверка ключей и моделей: по строке на каждого провайдера."""
         out = []
         probe = ('Ответь JSON {"ok": true}', "проверка связи")
-        for name, key, fn, model, base in (
-            ("Gemini", self.cfg.gemini_api_key, self._gemini_json, self.cfg.gemini_text_model,
+        for name, provider, key, fn, base in (
+            ("Gemini", "gemini", self.cfg.gemini_api_key, self._gemini_json,
              self.cfg.gemini_base_url or DEFAULT_GEMINI_BASE),
-            ("OpenAI", self.cfg.openai_api_key, self._openai_json, self.cfg.openai_text_model,
-             self.cfg.openai_base_url),
+            ("OpenAI", "openai", self.cfg.openai_api_key, self._openai_json, self.cfg.openai_base_url),
         ):
+            model = self.models[provider]
             host = base.split("://", 1)[-1].split("/", 1)[0]
             if not key:
                 out.append(f"{name}: ключ не задан")
@@ -267,7 +391,9 @@ class AI:
                 fmt = ""
                 if name == "Gemini" and not self._is_google:
                     fmt = ", формат " + ("Google" if self.gemini_style == "native" else "OpenAI")
-                out.append(f"✅ {name}: отвечает (модель {model}, {host}{fmt})")
+                used = self.models[provider]
+                auto = f"; заданная {model} недоступна, выбрана автоматически" if used != model else ""
+                out.append(f"✅ {name}: отвечает (модель {used}, {host}{fmt}{auto})")
             except (AIError, KeyError, ValueError) as e:
                 out.append(f"❌ {name} (модель {model}, {host}): {str(e)[:300]}")
         return out

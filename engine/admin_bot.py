@@ -28,6 +28,7 @@ HELP = """Команды:
 /queue — что ждёт одобрения и публикации
 /status — состояние системы
 /ai — проверить ключи и модели нейросетей
+/models — какие модели есть у посредников
 /trends — обновить тренды прямо сейчас
 /stats — статистика роликов
 /analyze — пересчитать плейбук по статистике
@@ -53,6 +54,7 @@ class Services:
     stats_text: Callable[[], str]
     check_ai: Callable[[], str] = lambda: "Проверка нейросетей недоступна"
     scout_trends: Callable[[], str] = lambda: "Разведчик трендов недоступен"
+    models_report: Callable[[], str] = lambda: "Список моделей недоступен"
 
 
 def approval_keyboard(post_id: int) -> dict:
@@ -325,6 +327,9 @@ class AdminBot:
         elif cmd == "/ai":
             self.say("Проверяю нейросети…")
             self.run_bg(lambda: self.say(self.s.check_ai()))
+        elif cmd == "/models":
+            self.say("Запрашиваю списки моделей у посредников…")
+            self.run_bg(lambda: self.say(self.s.models_report()))
         elif cmd == "/trends":
             self.say("Смотрю свежие тренды Reels и Shorts, это займёт около минуты…")
             self.run_bg(lambda: self.say(self.s.scout_trends()))

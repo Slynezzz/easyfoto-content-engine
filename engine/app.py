@@ -290,6 +290,7 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
             run_analysis=lambda: analyst.run(cfg, db, ai),
             stats_text=lambda: analyst.stats_text(db),
             check_ai=lambda: "\n".join(ai.check()),
+            models_report=ai.models_report,
             scout_trends=lambda: scout.run(cfg, db, ai),
         ))
         engine.bot = bot

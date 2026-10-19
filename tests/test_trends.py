@@ -9,7 +9,7 @@ from unittest import mock
 from engine import playbook as pbm, scout
 from engine.config import Config
 from engine.db import DB
-from engine.llm import AI, AIError
+from engine.llm import AI, AIError, rank_text_models
 from engine.planner import _clip, plan
 from engine.video import skins
 from engine.video.templates import Script, looks_carousel
@@ -310,3 +310,96 @@ class ProxyStyleTests(unittest.TestCase):
         with self.assertRaises(AIError) as ctx:
             AI(self.cfg).research("s", "p")
         self.assertIn("поиск Google", str(ctx.exception))
+
+
+class ModelFallbackTests(unittest.TestCase):
+    """Сценарии из реального запуска: модель неизвестна или временно недоступна у посредника."""
+
+    def setUp(self):
+        self.cfg = Config(data_dir=Path(tempfile.mkdtemp()), gemini_api_key="sk-cvc-x",
+                          gemini_base_url="https://saintstore.example", openai_api_key="sk-star-y",
+                          openai_base_url="https://ai.starimg.example/v1")
+        self.sleep = mock.patch("engine.llm.time.sleep")
+        self.sleep.start()
+
+    def tearDown(self):
+        self.sleep.stop()
+
+    def test_rank_text_models(self):
+        ids = ["dall-e-3", "gpt-image-1.5", "gpt-4o-mini", "text-embedding-3-small", "gpt-5", "whisper-1",
+               "openai/gpt-4.1-mini", "gpt-4o-mini-tts"]
+        self.assertEqual(rank_text_models("openai", ids), ["openai/gpt-4.1-mini", "gpt-4o-mini", "gpt-5"])
+        g = ["gemini-2.5-flash-image", "gemini-3-flash-preview", "gemini-2.0-flash", "imagen-4", "gemini-embedding-001"]
+        self.assertEqual(rank_text_models("gemini", g), ["gemini-2.0-flash", "gemini-3-flash-preview"])
+
+    def test_unknown_openai_model_switches_to_available_one(self):
+        self.cfg.gemini_api_key = ""
+        sent = []
+
+        def post(url, timeout=None, json=None, **kw):
+            sent.append(json["model"])
+            if json["model"] == "gpt-4.1-mini":
+                return Resp(400, {"error": {"message": "Unknown model. Use one of the models listed by GET /v1/models."}})
+            return Resp(200, {"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+        def get(url, headers=None, timeout=None):
+            self.assertEqual(url, "https://ai.starimg.example/v1/models")
+            return Resp(200, {"data": [{"id": "gpt-image-1.5"}, {"id": "gpt-4o-mini"}, {"id": "gpt-5"}]})
+        ai = AI(self.cfg)
+        with mock.patch("engine.llm.requests.post", side_effect=post), \
+             mock.patch("engine.llm.requests.get", side_effect=get):
+            self.assertEqual(ai.json("s", "p"), {"ok": True})
+            ai.json("s", "p")
+        self.assertEqual(ai.models["openai"], "gpt-4o-mini")
+        self.assertEqual(sent, ["gpt-4.1-mini", "gpt-4o-mini", "gpt-4o-mini"])  # второй раз — сразу рабочая
+
+    def test_gemini_503_tries_other_models_from_proxy_list(self):
+        self.cfg.openai_api_key = ""
+        self.cfg.gemini_api_style = "native"
+
+        def post(url, timeout=None, **kw):
+            if "gemini-2.5-flash:" in url:
+                return Resp(503, {"error": {"message": "The model is temporarily unavailable. Please contact support."}})
+            return Resp(200, {"candidates": [{"content": {"parts": [{"text": '{"ok": 2}'}]}}]})
+
+        def get(url, headers=None, timeout=None):
+            return Resp(200, {"models": [
+                {"name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-2.0-flash", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/text-embedding-004", "supportedGenerationMethods": ["embedContent"]}]})
+        ai = AI(self.cfg)
+        with mock.patch("engine.llm.requests.post", side_effect=post), \
+             mock.patch("engine.llm.requests.get", side_effect=get):
+            lines = ai.check()
+        self.assertEqual(ai.models["gemini"], "gemini-2.0-flash")
+        self.assertIn("✅ Gemini", lines[0])
+        self.assertIn("выбрана автоматически", lines[0])
+
+    def test_unrelated_errors_do_not_trigger_model_hunt(self):
+        self.cfg.gemini_api_key = ""
+        with mock.patch("engine.llm.requests.post",
+                        return_value=Resp(401, {"error": {"message": "Incorrect API key provided"}})), \
+             mock.patch("engine.llm.requests.get") as get:
+            with self.assertRaises(AIError):
+                AI(self.cfg).json("s", "p")
+        get.assert_not_called()
+
+    def test_gives_up_with_clear_message(self):
+        self.cfg.gemini_api_key = ""
+        unk = Resp(400, {"error": {"message": "Unknown model"}})
+        with mock.patch("engine.llm.requests.post", return_value=unk), \
+             mock.patch("engine.llm.requests.get", return_value=Resp(200, {"data": [{"id": "gpt-4o"}]})):
+            with self.assertRaises(AIError) as ctx:
+                AI(self.cfg).json("s", "p")
+        self.assertIn("другие модели посредника тоже не ответили (gpt-4o)", str(ctx.exception))
+
+    def test_models_report(self):
+        with mock.patch("engine.llm.requests.get", side_effect=[
+            Resp(404, {}), Resp(200, {"data": [{"id": "gemini-2.0-flash"}, {"id": "gemini-2.5-flash-image"}]}),
+            Resp(200, {"data": [{"id": "gpt-4o-mini"}, {"id": "dall-e-3"}]})]):
+            text = AI(self.cfg).models_report()
+        self.assertIn("gemini-2.0-flash", text)
+        self.assertIn("gpt-4o-mini", text)
+        openai_line = next(l for l in text.split("\n") if "Текстовые" in l and "gpt" in l)
+        self.assertNotIn("dall-e-3", openai_line)
+        self.assertIn("сейчас используется: gpt-4.1-mini", text)
