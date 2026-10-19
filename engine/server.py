@@ -1,0 +1,95 @@
+"""HTTP-сервер: отдаёт готовые ролики Instagram'у и отвечает на проверку здоровья.
+
+Отдаются только файлы вида /media/<случайный_токен>.mp4|.jpg — список
+файлов посмотреть нельзя, а токен не угадать.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+MEDIA_RE = re.compile(r"^/media/([A-Za-z0-9_-]{16,64})\.(mp4|jpg)$")
+TYPES = {"mp4": "video/mp4", "jpg": "image/jpeg"}
+CHUNK = 256 * 1024
+
+
+def make_handler(media_dir: Path):
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "content-engine"
+
+        def log_message(self, fmt, *args):  # в логи Railway — только суть
+            log.info("%s %s", self.address_string(), fmt % args)
+
+        def _send_file(self, head_only: bool):
+            m = MEDIA_RE.match(self.path.split("?", 1)[0])
+            if not m:
+                self.send_error(404)
+                return
+            path = media_dir / f"{m.group(1)}.{m.group(2)}"
+            if not path.is_file():
+                self.send_error(404)
+                return
+            size = path.stat().st_size
+            start, end = 0, size - 1
+            rng = self.headers.get("Range")
+            if rng and (rm := re.match(r"bytes=(\d*)-(\d*)$", rng.strip())):
+                if rm.group(1):
+                    start = int(rm.group(1))
+                    end = int(rm.group(2)) if rm.group(2) else size - 1
+                elif rm.group(2):  # bytes=-N — последние N байт
+                    start = max(0, size - int(rm.group(2)))
+                end = min(end, size - 1)
+                if start > end:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.end_headers()
+                    return
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            else:
+                self.send_response(200)
+            self.send_header("Content-Type", TYPES[m.group(2)])
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            if head_only:
+                return
+            with path.open("rb") as f:
+                f.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    chunk = f.read(min(CHUNK, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+
+        def do_GET(self):
+            if self.path in ("/", "/health"):
+                body = b"ok"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self._send_file(head_only=False)
+
+        def do_HEAD(self):
+            self._send_file(head_only=True)
+
+    return Handler
+
+
+def start(media_dir: Path, port: int, host: str = "0.0.0.0") -> ThreadingHTTPServer:
+    srv = ThreadingHTTPServer((host, port), make_handler(media_dir))
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, name="http", daemon=True).start()
+    log.info("HTTP-сервер слушает порт %s", port)
+    return srv

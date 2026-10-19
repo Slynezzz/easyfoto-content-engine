@@ -57,6 +57,10 @@ def approval_keyboard(post_id: int) -> dict:
     ]}
 
 
+def retry_keyboard(post_id: int) -> dict:
+    return {"inline_keyboard": [[{"text": "🔁 Повторить публикацию", "callback_data": f"retry:{post_id}"}]]}
+
+
 def _status_keyboard(label: str) -> dict:
     return {"inline_keyboard": [[{"text": label, "callback_data": "noop"}]]}
 
@@ -291,6 +295,15 @@ class AdminBot:
             result = self.s.publish_now(post_id)
             mark("🚀 Опубликовано" if self.db.post(post_id)["status"] == "published" else "⚠️ Ошибка")
             self.say(result)
+            return
+
+        if action == "retry":
+            if not self.db.claim_post(post_id, "failed", "approved"):
+                self.api.answer_callback(cq["id"], "Уже обработан")
+                return
+            self.api.answer_callback(cq["id"], "Публикую повторно…")
+            mark("⏳ Публикуется…")
+            self.say(self.s.publish_now(post_id))
             return
 
         if action in ("no", "redo"):

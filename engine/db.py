@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS metrics (
     collected_at TEXT NOT NULL,
     plays INTEGER, reach INTEGER, likes INTEGER, comments INTEGER,
     saves INTEGER, shares INTEGER, avg_watch_ms INTEGER, total_watch_ms INTEGER,
+    skip_rate REAL,
     PRIMARY KEY (post_id, collected_at)
 );
 CREATE TABLE IF NOT EXISTS playbook_history (
@@ -80,6 +81,13 @@ class DB:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._lock = threading.RLock()
         self._conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Добавляет колонки, появившиеся в новых версиях, в уже существующую базу."""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(metrics)")}
+        if "skip_rate" not in cols:
+            self._conn.execute("ALTER TABLE metrics ADD COLUMN skip_rate REAL")
 
     def close(self) -> None:
         with self._lock:
@@ -165,9 +173,10 @@ class DB:
     def add_metrics(self, post_id: int, m: dict[str, int | None]) -> None:
         self.x(
             "INSERT OR REPLACE INTO metrics(post_id, collected_at, plays, reach, likes, comments, saves, "
-            "shares, avg_watch_ms, total_watch_ms) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "shares, avg_watch_ms, total_watch_ms, skip_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (post_id, now_iso(), m.get("plays"), m.get("reach"), m.get("likes"), m.get("comments"),
-             m.get("saves"), m.get("shares"), m.get("avg_watch_ms"), m.get("total_watch_ms")),
+             m.get("saves"), m.get("shares"), m.get("avg_watch_ms"), m.get("total_watch_ms"),
+             m.get("skip_rate")),
         )
 
     def latest_metrics(self) -> list[sqlite3.Row]:
