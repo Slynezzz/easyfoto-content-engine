@@ -111,6 +111,44 @@ class InstagramTests(unittest.TestCase):
             self.ig.publish(self.pid)
         self.assertFalse(any(c[1].endswith("/media") for c in g.calls))
 
+    def test_permalink_failure_does_not_fail_live_reel(self):
+        g = FakeGraph()
+        orig = g.get
+        g.get = lambda url, params=None, timeout=None: (
+            Resp({"error": {"message": "temp", "code": 2}}) if params.get("fields") == "permalink"
+            else orig(url, params, timeout))
+        with self._patch(g):
+            self.ig.publish(self.pid)
+        post = self.db.post(self.pid)
+        self.assertEqual((post["status"], post["ig_media_id"]), ("published", "MEDIA1"))
+
+    def test_crash_after_publish_is_recovered_without_second_publish(self):
+        # ролик вышел, но процесс упал до статуса published
+        self.db.update_post(self.pid, status="failed", ig_media_id="MEDIA1", ig_container_id="CONTAINER1")
+        self.db.claim_post(self.pid, "failed", "approved")
+        g = FakeGraph(statuses=[])
+        with self._patch(g):
+            self.ig.publish(self.pid)
+        self.assertFalse(any(c[1].endswith("/media_publish") for c in g.calls))
+        self.assertEqual(self.db.post(self.pid)["status"], "published")
+
+    def test_unexpected_exception_marks_failed(self):
+        g = FakeGraph()
+        g.post = lambda url, data=None, timeout=None: Resp({"weird": True})  # нет "id"
+        with self._patch(g):
+            with self.assertRaises(IGError):
+                self.ig.publish(self.pid)
+        self.assertEqual(self.db.post(self.pid)["status"], "failed")
+
+    def test_unsupported_metric_is_remembered(self):
+        with self._patch(FakeGraph(fail_metric="reels_skip_rate")):
+            self.ig.insights("MEDIA1")
+        self.assertIn("reels_skip_rate", self.db.get("ig_bad_metrics"))
+        g = FakeGraph(fail_metric="reels_skip_rate")
+        with self._patch(g):
+            self.ig.insights("MEDIA2")
+        self.assertEqual(sum(1 for c in g.calls if c[1].endswith("/insights")), 1)
+
     def test_insights_fall_back_to_single_metrics(self):
         with self._patch(FakeGraph(fail_metric="reels_skip_rate")):
             m = self.ig.insights("MEDIA1")

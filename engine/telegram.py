@@ -1,17 +1,29 @@
 """Минимальный клиент Telegram Bot API на requests."""
 from __future__ import annotations
 
+import io
 import json
 import logging
 from pathlib import Path
 
 import requests
+from PIL import Image
 
 log = logging.getLogger(__name__)
 
 
 class TelegramError(RuntimeError):
     pass
+
+
+def _thumbnail(path: Path) -> bytes:
+    """Telegram принимает миниатюру не больше 320 px по стороне и до 200 КБ."""
+    with Image.open(path) as im:
+        im = im.convert("RGB")
+        im.thumbnail((320, 320))
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=80)
+    return buf.getvalue()
 
 
 class TelegramAPI:
@@ -47,7 +59,7 @@ class TelegramAPI:
                    reply_markup: dict | None = None, cover: str | Path | None = None) -> dict:
         files = {"video": (Path(path).name, Path(path).read_bytes(), "video/mp4")}
         if cover and Path(cover).exists():
-            files["thumbnail"] = (Path(cover).name, Path(cover).read_bytes(), "image/jpeg")
+            files["thumbnail"] = ("thumb.jpg", _thumbnail(Path(cover)), "image/jpeg")
         return self.call("sendVideo", http_timeout=180, files=files, chat_id=chat_id, caption=caption[:1024],
                          reply_markup=reply_markup, supports_streaming="true",
                          width=1080, height=1920)

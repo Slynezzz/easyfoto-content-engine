@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS assets (
     title TEXT,
     description TEXT,
     used_count INTEGER NOT NULL DEFAULT 0,
+    tag_attempts INTEGER NOT NULL DEFAULT 0,
     last_used_at TEXT,
     created_at TEXT NOT NULL
 );
@@ -88,6 +89,9 @@ class DB:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(metrics)")}
         if "skip_rate" not in cols:
             self._conn.execute("ALTER TABLE metrics ADD COLUMN skip_rate REAL")
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(assets)")}
+        if "tag_attempts" not in cols:
+            self._conn.execute("ALTER TABLE assets ADD COLUMN tag_attempts INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         with self._lock:

@@ -14,6 +14,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 MEDIA_RE = re.compile(r"^/media/([A-Za-z0-9_-]{16,64})\.(mp4|jpg)$")
+MEDIA_TOKEN_RE = re.compile(r"/media/[A-Za-z0-9_-]+")
 TYPES = {"mp4": "video/mp4", "jpg": "image/jpeg"}
 CHUNK = 256 * 1024
 
@@ -22,8 +23,8 @@ def make_handler(media_dir: Path):
     class Handler(BaseHTTPRequestHandler):
         server_version = "content-engine"
 
-        def log_message(self, fmt, *args):  # в логи Railway — только суть
-            log.info("%s %s", self.address_string(), fmt % args)
+        def log_message(self, fmt, *args):  # в логи Railway — без токенов роликов
+            log.info("%s %s", self.address_string(), MEDIA_TOKEN_RE.sub("/media/***", fmt % args))
 
         def _send_file(self, head_only: bool):
             m = MEDIA_RE.match(self.path.split("?", 1)[0])

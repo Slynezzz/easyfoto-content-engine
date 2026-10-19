@@ -37,7 +37,7 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
     plan: planner.Plan | None = None
 
     if cfg.image_source in ("library", "mixed"):
-        rows, theme = images.pick_library(db, choice.theme, n, rng)
+        rows, theme = images.pick_library(db, choice.theme, n, rng, pbm.theme_weights(pb, today))
         if len(rows) >= MIN_PHOTOS:
             choice = dataclasses.replace(choice, theme=theme)
             photos = rows

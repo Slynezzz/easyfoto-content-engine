@@ -10,7 +10,9 @@ import logging
 import random
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -26,7 +28,7 @@ from .telegram import TelegramAPI
 log = logging.getLogger("engine")
 
 SLOT_FMT = "%Y-%m-%d %H:%M"
-LIVE = ("rendered", "pending", "approved", "publishing", "published", "manual")
+LIVE = ("rendered", "sending", "pending", "approved", "publishing", "published", "manual", "failed")
 
 
 class Engine:
@@ -80,8 +82,21 @@ class Engine:
             link = self.ig.publish(post_id)
         except IGError as e:
             self.say(f"⚠️ Ролик #{post_id} не опубликован: {e}", retry_keyboard(post_id))
-            return f"⚠️ Не получилось опубликовать #{post_id}."
+            return ""
         return f"🚀 Ролик #{post_id} опубликован: {link}"
+
+    def recover(self) -> int:
+        """После перезапуска: возвращает «зависшие» посты в рабочие статусы."""
+        n = 0
+        for p in self.db.posts("publishing"):
+            self.db.update_post(p["id"], status="failed", error="сервис перезапустился во время публикации")
+            self.say(f"⚠️ Ролик #{p['id']} публиковался в момент перезапуска сервиса. "
+                     "Проверь профиль: если ролика там нет — нажми «Повторить».", retry_keyboard(p["id"]))
+            n += 1
+        for p in self.db.posts("sending"):
+            self.db.update_post(p["id"], status="rendered")
+            n += 1
+        return n
 
     # ----------------------------------------------------------------- jobs
     def job_plan(self) -> int:
@@ -129,7 +144,9 @@ class Engine:
                if datetime.strptime(p["scheduled_for"], SLOT_FMT).replace(tzinfo=self.tz) <= now]
         if not due:
             return 0
-        self.say(self.publish(due[0]["id"]))
+        result = self.publish(due[0]["id"])
+        if result:
+            self.say(result)
         return 1
 
     def job_tag(self) -> int:
@@ -160,8 +177,31 @@ class Engine:
         self.say(analyst.run(self.cfg, self.db, self.ai))
         return True
 
+    def job_cleanup(self, keep_days: int = 7) -> int:
+        """Удаляет файлы роликов, которые больше не нужны: отклонённые и давно опубликованные.
+
+        Instagram хранит свою копию, а том Railway не бесконечный.
+        """
+        cutoff = (self.now() - timedelta(days=keep_days)).astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+        rows = self.db.q(
+            "SELECT id, video_path, cover_path FROM posts WHERE video_path IS NOT NULL AND ("
+            "(status='rejected') OR (status IN ('published','manual') AND COALESCE(published_at, created_at) < ?))",
+            (cutoff,))
+        n = 0
+        for r in rows:
+            for f in (r["video_path"], r["cover_path"]):
+                if f:
+                    Path(f).unlink(missing_ok=True)
+            self.db.update_post(r["id"], video_path=None, cover_path=None)
+            n += 1
+        return n
+
     def job_token(self) -> bool:
         if not self.ig.ready():
+            return False
+        if not self.db.get("ig_token_seen_at"):
+            # Свежий токен нельзя продлить раньше чем через сутки — первый раз только запоминаем.
+            self.db.set("ig_token_seen_at", self.now().isoformat(timespec="seconds"))
             return False
         ok = self.ig.refresh_token()
         if not ok:
@@ -176,7 +216,8 @@ class Engine:
             ("publish", timedelta(seconds=30), self.job_publish),
             ("metrics", timedelta(hours=6), self.job_metrics),
             ("analysis", timedelta(hours=1), self.job_analysis),
-            ("token", timedelta(days=7), self.job_token),
+            ("token", timedelta(days=7) if self.db.get("ig_token_seen_at") else timedelta(days=2), self.job_token),
+            ("cleanup", timedelta(hours=12), self.job_cleanup),
         ]
         for name, period, fn in jobs:
             if not self._every(name, period):
@@ -196,7 +237,17 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
     engine = Engine(cfg, db, ai, ig)
     bot = None
     if cfg.admin_bot_token:
-        bot = AdminBot(cfg, db, TelegramAPI(cfg.admin_bot_token), Services(
+        worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bot-job")
+
+        def run_bg(fn):
+            def safe():
+                try:
+                    fn()
+                except Exception:  # noqa: BLE001
+                    log.exception("фоновая задача бота упала")
+            return worker.submit(safe)
+
+        bot = AdminBot(cfg, db, TelegramAPI(cfg.admin_bot_token), run_bg=run_bg, services=Services(
             make_one=engine.make_one,
             publish_now=engine.publish,
             instagram_ready=ig.ready,
@@ -204,6 +255,7 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
             stats_text=lambda: analyst.stats_text(db),
         ))
         engine.bot = bot
+    engine.recover()
     return engine, bot
 
 

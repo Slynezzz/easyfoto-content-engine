@@ -66,11 +66,15 @@ def _status_keyboard(label: str) -> dict:
 
 
 class AdminBot:
-    def __init__(self, cfg: Config, db: DB, api: TelegramAPI, services: Services):
+    def __init__(self, cfg: Config, db: DB, api: TelegramAPI, services: Services,
+                 run_bg: Callable[[Callable[[], None]], object] | None = None):
         self.cfg = cfg
         self.db = db
         self.api = api
         self.s = services
+        # Сборка и публикация идут минуты: на проде выполняем их в отдельном
+        # потоке, чтобы бот продолжал отвечать. В тестах — синхронно.
+        self.run_bg = run_bg or (lambda fn: fn())
         self._album_kind: dict[str, str] = {}
 
     # ------------------------------------------------------------ helpers
@@ -95,15 +99,22 @@ class AdminBot:
             self.say(f"⚠️ Не получилось собрать ролик: {e}")
             return None
 
+    def _publish(self, post_id: int, mark: Callable[[str], None]) -> None:
+        result = self.s.publish_now(post_id)  # об ошибке с кнопкой повтора сообщает сам publish_now
+        ok = self.db.post(post_id)["status"] == "published"
+        mark("🚀 Опубликовано" if ok else "⚠️ Ошибка")
+        if ok and result:
+            self.say(result)
+
     @property
     def paused(self) -> bool:
         return self.db.get("paused") == "1"
 
     # ----------------------------------------------------------- approval
     def send_for_approval(self, post_id: int) -> bool:
-        post = self.db.post(post_id)
-        if not post or post["status"] != "rendered" or not self.admin:
+        if not self.admin or not self.db.claim_post(post_id, "rendered", "sending"):
             return False
+        post = self.db.post(post_id)
         plan = json.loads(post["script_json"])
         tags = " · ".join(x for x in (
             FORMAT_RU.get(post["format"], post["format"]),
@@ -117,8 +128,9 @@ class AdminBot:
         try:
             msg = self.api.send_video(self.admin, post["video_path"], caption,
                                       approval_keyboard(post_id), cover=post["cover_path"])
-        except TelegramError as e:
+        except Exception as e:  # noqa: BLE001 — вернём в очередь, досылка попробует снова
             log.error("send_video #%s: %s", post_id, e)
+            self.db.update_post(post_id, status="rendered")
             return False
         self.db.update_post(post_id, status="pending", approval_message_id=msg["message_id"])
         return True
@@ -210,9 +222,12 @@ class AdminBot:
             self.say(HELP)
         elif cmd == "/make":
             self.say("Собираю ролик, это займёт 1–3 минуты…")
-            post_id = self._make()
-            if post_id is not None and not self.send_for_approval(post_id):
-                self.say(f"Ролик #{post_id} собран, но отправить его не удалось.")
+
+            def job():
+                post_id = self._make()
+                if post_id is not None and not self.send_for_approval(post_id):
+                    self.say(f"Ролик #{post_id} собран, отправлю его чуть позже.")
+            self.run_bg(job)
         elif cmd == "/queue":
             self.say(self.queue_text())
         elif cmd == "/status":
@@ -220,7 +235,7 @@ class AdminBot:
         elif cmd == "/stats":
             self.say(self.s.stats_text())
         elif cmd == "/analyze":
-            self.say(self.s.run_analysis())
+            self.run_bg(lambda: self.say(self.s.run_analysis()))
         elif cmd == "/pause":
             self.db.set("paused", "1")
             self.say("⏸ Автопубликация на паузе. Ролики продолжат собираться на одобрение.")
@@ -292,9 +307,7 @@ class AdminBot:
                 return
             self.api.answer_callback(cq["id"], "Публикую…")
             mark("⏳ Публикуется…")
-            result = self.s.publish_now(post_id)
-            mark("🚀 Опубликовано" if self.db.post(post_id)["status"] == "published" else "⚠️ Ошибка")
-            self.say(result)
+            self.run_bg(lambda: self._publish(post_id, mark))
             return
 
         if action == "retry":
@@ -303,7 +316,7 @@ class AdminBot:
                 return
             self.api.answer_callback(cq["id"], "Публикую повторно…")
             mark("⏳ Публикуется…")
-            self.say(self.s.publish_now(post_id))
+            self.run_bg(lambda: self._publish(post_id, mark))
             return
 
         if action in ("no", "redo"):
@@ -315,12 +328,15 @@ class AdminBot:
             if action == "redo":
                 old = self.db.post(post_id)
                 self.say("Собираю другой вариант…")
-                new_id = self._make()
-                if new_id is None:
-                    return
-                if old["scheduled_for"]:
-                    self.db.update_post(new_id, scheduled_for=old["scheduled_for"])
-                self.send_for_approval(new_id)
+
+                def job():
+                    new_id = self._make()
+                    if new_id is None:
+                        return
+                    if old["scheduled_for"]:
+                        self.db.update_post(new_id, scheduled_for=old["scheduled_for"])
+                    self.send_for_approval(new_id)
+                self.run_bg(job)
             return
 
         self.api.answer_callback(cq["id"])

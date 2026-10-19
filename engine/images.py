@@ -25,6 +25,7 @@ from .llm import AI, AIError
 log = logging.getLogger(__name__)
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+MAX_TAG_ATTEMPTS = 3
 CORE_PROMPT_PATH = Path(__file__).with_name("prompts") / "core.md"
 
 TAG_SYSTEM = """Ты размечаешь фотографии для контент-плана. Смотришь на фото и отвечаешь JSON:
@@ -70,7 +71,8 @@ def scan(cfg: Config, db: DB) -> dict[str, int]:
 
 
 def _thumb(path: str, size: int = 768) -> bytes:
-    im = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+    with Image.open(path) as src:
+        im = ImageOps.exif_transpose(src).convert("RGB")
     im.thumbnail((size, size))
     buf = io.BytesIO()
     im.save(buf, "JPEG", quality=85)
@@ -79,7 +81,8 @@ def _thumb(path: str, size: int = 768) -> bytes:
 
 def tag_library(cfg: Config, db: DB, ai: AI, themes: dict[str, dict], limit: int = 50) -> int:
     """Подписывает неразмеченные фото библиотеки. Возвращает число размеченных."""
-    rows = db.q("SELECT * FROM assets WHERE kind='library' AND title IS NULL ORDER BY id LIMIT ?", (limit,))
+    rows = db.q("SELECT * FROM assets WHERE kind='library' AND title IS NULL AND tag_attempts < ? "
+                "ORDER BY id LIMIT ?", (MAX_TAG_ATTEMPTS, limit))
     if not rows:
         return 0
     theme_list = "\n".join(f"- {k}: {v['title']}" for k, v in themes.items())
@@ -93,6 +96,7 @@ def tag_library(cfg: Config, db: DB, ai: AI, themes: dict[str, dict], limit: int
             res = ai.json(TAG_SYSTEM, f"Темы:\n{theme_list}", images=[thumb], temperature=0.2)
         except (AIError, OSError) as e:
             log.warning("tagging %s failed: %s", row["path"], e)
+            db.x("UPDATE assets SET tag_attempts=tag_attempts+1 WHERE id=?", (row["id"],))
             continue
         finally:
             thumb.unlink(missing_ok=True)
@@ -106,7 +110,8 @@ def tag_library(cfg: Config, db: DB, ai: AI, themes: dict[str, dict], limit: int
     return done
 
 
-def pick_library(db: DB, theme: str, n: int, rng: random.Random) -> tuple[list, str]:
+def pick_library(db: DB, theme: str, n: int, rng: random.Random,
+                 weights: dict[str, float] | None = None) -> tuple[list, str]:
     """n фото из библиотеки: сначала из темы, наименее использованные.
 
     Возвращает (фото, фактическая тема). Если в теме мало фото — берёт
@@ -125,12 +130,17 @@ def pick_library(db: DB, theme: str, n: int, rng: random.Random) -> tuple[list, 
 
     if len(by_theme.get(theme, [])) >= n:
         return take(by_theme[theme]), theme
-    enough = [t for t, rows in by_theme.items() if len(rows) >= n]
+    def allowed(t: str) -> bool:
+        return weights is None or weights.get(t, 0) > 0
+
+    enough = [t for t, rows in by_theme.items() if len(rows) >= n and allowed(t)]
     if enough:
-        t = rng.choice(enough)
+        w = [weights[t] for t in enough] if weights else None
+        t = rng.choices(enough, weights=w, k=1)[0]
         return take(by_theme[t]), t
-    if len(tagged) >= 3:
-        return take(tagged), "mixed"
+    pool = [r for r in tagged if allowed(r["theme"])]
+    if len(pool) >= 3:
+        return take(pool), "mixed"
     return [], theme
 
 
@@ -145,7 +155,21 @@ def generate(cfg: Config, db: DB, ai: AI, scene: dict, theme: str) -> int:
     if not refs:
         raise AIError("нет референсов: положи свои фото в assets/refs")
     prompt = f"{core_prompt(cfg)}\n\n{scene_prompt(scene)}"
-    res = ai.image(prompt, refs)
+    # Оригиналы «файлом» бывают по 5–20 МБ: 8 таких в одном запросе
+    # превышают лимит Gemini. Отправляем уменьшенные копии.
+    work = cfg.data_dir / "work" / uuid.uuid4().hex[:8]
+    work.mkdir(parents=True, exist_ok=True)
+    small = []
+    for i, ref in enumerate(refs):
+        dst = work / f"ref{i}.jpg"
+        dst.write_bytes(_thumb(ref, 1536))
+        small.append(dst)
+    try:
+        res = ai.image(prompt, small)
+    finally:
+        for f in small:
+            f.unlink(missing_ok=True)
+        work.rmdir()
     im = Image.open(io.BytesIO(res.data)).convert("RGB")
     out = cfg.assets_dir / "generated" / f"{uuid.uuid4().hex[:12]}.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)

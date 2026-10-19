@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from engine.admin_bot import AdminBot, Services
@@ -118,6 +119,18 @@ class AdminBotTests(unittest.TestCase):
         self.assertIn(f"ok:{pid}", datas)
         self.assertEqual(self.db.post(pid)["status"], "pending")
         self.assertFalse(self.bot.send_for_approval(pid))  # повторно не шлём
+
+    def test_failed_upload_returns_post_to_queue(self):
+        pid = self._post(status="rendered")
+        self.api.send_video = mock.Mock(side_effect=RuntimeError("network"))
+        self.assertFalse(self.bot.send_for_approval(pid))
+        self.assertEqual(self.db.post(pid)["status"], "rendered")
+
+    def test_concurrent_sends_deliver_once(self):
+        pid = self._post(status="rendered")
+        self.db.claim_post(pid, "rendered", "sending")  # другой поток уже отправляет
+        self.assertFalse(self.bot.send_for_approval(pid))
+        self.assertEqual([m for m, _ in self.api.sent], [])
 
     def test_approve_goes_to_queue(self):
         pid = self._post()

@@ -81,62 +81,90 @@ class Instagram:
         return f"{self.cfg.public_base_url}/media/{token}.{ext}"
 
     def publish(self, post_id: int, max_wait_s: int = 300, poll_s: int = 20) -> str:
-        """Публикует одобренный пост. Возвращает ссылку на Reels."""
+        """Публикует одобренный пост. Возвращает ссылку на Reels.
+
+        Любая ошибка переводит пост в 'failed' (с кнопкой повтора), а не
+        оставляет его в 'publishing'. Если ролик уже вышел, его media_id
+        сохраняется сразу, и повтор просто дозаполняет ссылку.
+        """
         post = self.db.post(post_id)
         if not post:
             raise IGError(f"пост #{post_id} не найден")
         if not self.db.claim_post(post_id, "approved", "publishing"):
             raise IGError(f"пост #{post_id} не в статусе «одобрен» (сейчас: {post['status']})")
+        media_id = post["ig_media_id"]
         try:
-            container = post["ig_container_id"]
-            if not container:
-                container = self._req(
-                    "POST", f"{self.cfg.ig_user_id}/media",
-                    media_type="REELS",
-                    video_url=self.media_url(post["media_token"], "mp4"),
-                    cover_url=self.media_url(post["media_token"], "jpg"),
-                    caption=post["caption"] or "",
-                    share_to_feed="true",
-                )["id"]
-                self.db.update_post(post_id, ig_container_id=container)
-
-            waited = 0
-            while True:
-                status = self._req("GET", container, fields="status_code,status").get("status_code")
-                if status == "FINISHED":
-                    break
-                if status in ("ERROR", "EXPIRED"):
-                    raise IGError(f"Instagram не принял видео: {status}")
-                if status == "PUBLISHED":
-                    break
-                if waited >= max_wait_s:
-                    raise IGError("Instagram слишком долго обрабатывает видео")
-                self.sleep(poll_s)
-                waited += poll_s
-
-            media_id = self._req("POST", f"{self.cfg.ig_user_id}/media_publish", creation_id=container)["id"]
-            permalink = self._req("GET", media_id, fields="permalink").get("permalink", "")
-        except IGError as e:
+            if not media_id:
+                media_id = self._create_and_publish(post_id, post, max_wait_s, poll_s)
+        except Exception as e:  # noqa: BLE001 — любая ошибка не должна оставить пост «в публикации»
+            msg = str(e) if isinstance(e, IGError) else f"{type(e).__name__}: {e}"
+            msg = msg.replace(self.token, "***") if self.token else msg
             # Контейнер в статусе ERROR/EXPIRED переиспользовать нельзя — сбрасываем.
-            reset = {"ig_container_id": None} if "не принял" in str(e) else {}
-            self.db.update_post(post_id, status="failed", error=str(e)[:500], **reset)
-            raise
+            reset = {"ig_container_id": None} if "не принял" in msg else {}
+            self.db.update_post(post_id, status="failed", error=msg[:500], **reset)
+            raise IGError(msg) from None
+        try:
+            permalink = self._req("GET", media_id, fields="permalink").get("permalink", "")
+        except IGError as e:  # ролик уже вышел — ссылка не обязательна
+            log.warning("permalink #%s: %s", post_id, e)
+            permalink = ""
         self.db.update_post(post_id, status="published", ig_media_id=media_id, permalink=permalink,
-                            published_at=now_iso(), error=None)
-        return permalink
+                            published_at=post["published_at"] or now_iso(), error=None)
+        return permalink or f"(ролик опубликован, id {media_id})"
+
+    def _create_and_publish(self, post_id: int, post, max_wait_s: int, poll_s: int) -> str:
+        container = post["ig_container_id"]
+        if not container:
+            container = self._req(
+                "POST", f"{self.cfg.ig_user_id}/media",
+                media_type="REELS",
+                video_url=self.media_url(post["media_token"], "mp4"),
+                cover_url=self.media_url(post["media_token"], "jpg"),
+                caption=post["caption"] or "",
+                share_to_feed="true",
+            ).get("id")
+            if not container:
+                raise IGError("Instagram не вернул id контейнера")
+            self.db.update_post(post_id, ig_container_id=container)
+
+        waited = 0
+        while True:
+            status = self._req("GET", container, fields="status_code,status").get("status_code")
+            if status == "FINISHED":
+                break
+            if status in ("ERROR", "EXPIRED"):
+                raise IGError(f"Instagram не принял видео: {status}")
+            if status == "PUBLISHED":
+                raise IGError("контейнер уже опубликован, но id ролика не сохранён — проверь профиль вручную")
+            if waited >= max_wait_s:
+                raise IGError("Instagram слишком долго обрабатывает видео")
+            self.sleep(poll_s)
+            waited += poll_s
+
+        media_id = self._req("POST", f"{self.cfg.ig_user_id}/media_publish", creation_id=container).get("id")
+        if not media_id:
+            raise IGError("Instagram не вернул id опубликованного ролика")
+        # Сохраняем сразу: даже если дальше что-то упадёт, ролик не опубликуется второй раз.
+        self.db.update_post(post_id, ig_media_id=media_id, published_at=now_iso())
+        return media_id
 
     # ----------------------------------------------------------- insights
     def insights(self, media_id: str) -> dict[str, int | float | None]:
         """Метрики ролика. Если какая-то метрика не поддерживается, запрашивает по одной."""
+        bad = set(filter(None, (self.db.get("ig_bad_metrics") or "").split(",")))
+        metrics = [m for m in METRICS if m not in bad]
         try:
-            data = self._req("GET", f"{media_id}/insights", metric=",".join(METRICS))["data"]
+            data = self._req("GET", f"{media_id}/insights", metric=",".join(metrics)).get("data", [])
         except IGError:
             data = []
-            for m in METRICS:
+            for m in metrics:
                 try:
-                    data += self._req("GET", f"{media_id}/insights", metric=m)["data"]
+                    data += self._req("GET", f"{media_id}/insights", metric=m).get("data", [])
                 except IGError as e:
+                    if "code 100" in str(e):  # метрика не поддерживается — больше не спрашиваем
+                        bad.add(m)
                     log.debug("metric %s unavailable: %s", m, e)
+            self.db.set("ig_bad_metrics", ",".join(sorted(bad)))
         raw = {d["name"]: (d.get("values") or [{}])[0].get("value") for d in data}
         return {
             "plays": raw.get("views"), "reach": raw.get("reach"), "likes": raw.get("likes"),

@@ -153,6 +153,32 @@ class EngineTests(unittest.TestCase):
             self.assertTrue(self.engine.job_analysis())
         self.assertEqual(run.call_count, 2)
 
+    def test_recover_releases_stuck_posts(self):
+        a = self.db.create_post(status="publishing", format="w", hook_id="h", theme="t", script_json={})
+        b = self.db.create_post(status="sending", format="w", hook_id="h", theme="t", script_json={})
+        self.assertEqual(self.engine.recover(), 2)
+        self.assertEqual(self.db.post(a)["status"], "failed")
+        self.assertEqual(self.db.post(b)["status"], "rendered")
+        self.assertEqual(self.bot.said[-1][1]["inline_keyboard"][0][0]["callback_data"], f"retry:{a}")
+
+    def test_cleanup_removes_only_finished_media(self):
+        files = {}
+        for name, status, pub in (("rej", "rejected", None), ("old", "published", "2026-10-01T00:00:00+00:00"),
+                                  ("new", "published", "2026-10-19T00:00:00+00:00"), ("wait", "pending", None)):
+            v = Path(self._tmp.name) / f"{name}.mp4"
+            v.write_bytes(b"x")
+            files[name] = v
+            self.db.create_post(status=status, format="w", hook_id="h", theme="t", script_json={},
+                                video_path=str(v), published_at=pub)
+        self.assertEqual(self.engine.job_cleanup(), 2)
+        self.assertEqual({k for k, v in files.items() if v.exists()}, {"new", "wait"})
+
+    def test_fresh_token_is_not_refreshed_immediately(self):
+        self.ig.refresh_token = mock.Mock(return_value=True)
+        self.assertFalse(self.engine.job_token())
+        self.ig.refresh_token.assert_not_called()
+        self.assertTrue(self.engine.job_token())
+
     def test_tick_survives_failing_job(self):
         self.engine.job_tag = mock.Mock(side_effect=RuntimeError("x"))
         self.engine.tick()
@@ -207,10 +233,22 @@ class AnalystTests(unittest.TestCase):
         self.assertIn("▲", report)
         self.assertEqual(self.db.one("SELECT COUNT(*) n FROM playbook_history")["n"], 1)
 
-    def test_skip_rate_units(self):
-        self.assertEqual(analyst.skip_pct(0.35), 35)
-        self.assertEqual(analyst.skip_pct(35), 35)
+    def test_skip_rate_units_decided_by_whole_sample(self):
+        self.assertEqual(analyst.skip_scale([0.35, 0.6]), 100)
+        self.assertEqual(analyst.skip_scale([0.5, 35]), 1)   # 0.5% при процентах — не доля
+        self.assertEqual(analyst.skip_pct(0.35, 100), 35)
         self.assertIsNone(analyst.skip_pct(None))
+
+    def test_repeated_analysis_converges_instead_of_compounding(self):
+        for i in range(4):
+            self._published("before_after", "sent_selfies", "cinema", 5000 + i, 30, 50)
+            self._published("worlds", "eras", "eras", 200 + i, 70, 1)
+        weights = []
+        for _ in range(8):
+            analyst.run(self.cfg, self.db, None)
+            weights.append(pbm.load(self.cfg.playbook_path)["formats"]["before_after"]["weight"])
+        self.assertLess(weights[-1], 3.0)
+        self.assertLess(abs(weights[-1] - weights[-2]), 0.02)
 
     def test_stats_text(self):
         self.assertIn("пока нет", analyst.stats_text(self.db))

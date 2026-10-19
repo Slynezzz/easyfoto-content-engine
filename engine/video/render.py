@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -284,7 +285,10 @@ def render(spec: VideoSpec, out_path: str | Path, cover_path: str | Path | None 
         "-movflags", "+faststart",
         str(out_path),
     ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    # stderr пишем во временный файл: если ffmpeg начнёт много писать в лог,
+    # канал не переполнится и процессы не заблокируют друг друга.
+    errfile = tempfile.TemporaryFile()
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=errfile)
     cover_saved = False
     try:
         for i in range(n_frames):
@@ -297,9 +301,11 @@ def render(spec: VideoSpec, out_path: str | Path, cover_path: str | Path | None 
         proc.stdin.close()
     except BrokenPipeError:
         pass
-    err = proc.stderr.read().decode(errors="replace")
-    proc.stderr.close()
-    if proc.wait() != 0:
+    code = proc.wait()
+    errfile.seek(0)
+    err = errfile.read()[-4000:].decode(errors="replace")
+    errfile.close()
+    if code != 0:
         raise RuntimeError(f"ffmpeg завершился с ошибкой: {err.strip()}")
     if cover_path and not cover_saved:
         render_frame(placed, 0).save(cover_path, "JPEG", quality=90)

@@ -35,12 +35,15 @@ INSIGHT_SYSTEM = """Ты аналитик коротких видео. По та
 Ответ JSON: {"insights": ["...", "..."], "summary": "2–3 предложения для владельца"}"""
 
 
-def skip_pct(v: float | None) -> float | None:
-    """Meta не уточняет единицы reels_skip_rate; приводим к процентам."""
-    if v is None:
-        return None
-    v = float(v)
-    return v * 100 if v <= 1 else v
+def skip_scale(values: list) -> float:
+    """Meta не уточняет единицы reels_skip_rate. Если все значения ≤ 1 —
+    это доли, иначе проценты. Решаем по всей выборке, а не по одному числу."""
+    known = [float(v) for v in values if v is not None]
+    return 100.0 if known and max(known) <= 1 else 1.0
+
+
+def skip_pct(v: float | None, scale: float = 1.0) -> float | None:
+    return None if v is None else float(v) * scale
 
 
 def _ranks(values: list[float | None]) -> list[float]:
@@ -61,7 +64,8 @@ def _ranks(values: list[float | None]) -> list[float]:
 
 def score_posts(rows: list[dict]) -> list[dict]:
     plays = [r.get("plays") for r in rows]
-    hold = [None if r.get("skip_rate") is None else 1 - skip_pct(r["skip_rate"]) / 100 for r in rows]
+    scale = skip_scale([r.get("skip_rate") for r in rows])
+    hold = [None if r.get("skip_rate") is None else 1 - skip_pct(r["skip_rate"], scale) / 100 for r in rows]
     eng = [None if not r.get("plays") else
            ((r.get("saves") or 0) + (r.get("shares") or 0) + (r.get("comments") or 0)) / r["plays"]
            for r in rows]
@@ -167,9 +171,10 @@ def stats_text(db: DB) -> str:
     total = sum(r.get("plays") or 0 for r in rows)
     lines = [f"Роликов со статистикой: {len(rows)}, просмотров всего: {total}"]
     top = sorted(rows, key=lambda r: -(r.get("plays") or 0))[:5]
+    scale = skip_scale([r.get("skip_rate") for r in rows])
     lines.append("Топ по просмотрам:")
     for r in top:
-        skip = skip_pct(r.get("skip_rate"))
+        skip = skip_pct(r.get("skip_rate"), scale)
         lines.append(f"  #{r['post_id']} · {r['format']} · {r['theme']}: {r.get('plays') or 0} просм., "
                      f"{r.get('saves') or 0} сохр., {r.get('shares') or 0} репост."
                      + (f", пролистали {skip:.0f}%" if skip is not None else ""))

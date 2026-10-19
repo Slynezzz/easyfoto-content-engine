@@ -126,6 +126,30 @@ class ProducerTests(unittest.TestCase):
             produce(self.cfg, self.db, FakeAI(), self.pb, self.today)
         self.assertIn("библиотек", str(ctx.exception))
 
+    def test_untaggable_photo_is_skipped_after_three_attempts(self):
+        self._fill("library", 2)
+        images.scan(self.cfg, self.db)
+
+        class Refusing(FakeAI):
+            def json(self, system, prompt, images=None, temperature=0.9):
+                if images:
+                    raise AIError("refused")
+                return super().json(system, prompt, images, temperature)
+        ai = Refusing()
+        for _ in range(5):
+            images.tag_library(self.cfg, self.db, ai, self.pb["themes"])
+        self.assertEqual(len(ai.json_calls), 0)  # отказы не считаются как вызовы JSON-ответа
+        rows = self.db.assets("library")
+        self.assertTrue(all(r["tag_attempts"] == 3 for r in rows))
+
+    def test_out_of_season_theme_never_used_as_fallback(self):
+        self._fill("library", 5)
+        images.scan(self.cfg, self.db)
+        self.db.x("UPDATE assets SET title='Ёлка', theme='newyear'")
+        weights = pbm.theme_weights(self.pb, self.today)  # сентябрь
+        rows, theme = images.pick_library(self.db, "cinema", 4, random.Random(1), weights)
+        self.assertEqual(rows, [])
+
     def test_custom_core_prompt_overrides_default(self):
         self.assertIn("ЯДРО", images.core_prompt(self.cfg))
         (self.cfg.data_dir / "core_prompt.md").write_text("МОЙ ПРОМПТ", encoding="utf-8")

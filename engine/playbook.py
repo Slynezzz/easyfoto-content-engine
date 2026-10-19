@@ -110,12 +110,16 @@ def reweight(pb: dict, scores: dict[str, dict[str, float]], note: str = "",
     неделя не обнулила остальные варианты.
     """
     new = copy.deepcopy(pb)
+    base = json.loads(DEFAULT_PATH.read_text(encoding="utf-8"))
     for dim in ("formats", "hooks", "themes"):
         for key, score in scores.get(dim, {}).items():
             if key not in new[dim]:
                 continue
             w = new[dim][key]["weight"]
-            target = w * max(0.2, min(3.0, score))
+            # Цель считается от исходного веса, а не от текущего: при тех же
+            # данных веса сходятся к base*score, а не растут каждую неделю.
+            b = new[dim][key].get("base_weight") or base.get(dim, {}).get(key, {}).get("weight", 1.0)
+            target = b * max(0.2, min(3.0, score))
             new[dim][key]["weight"] = round(max(MIN_WEIGHT, min(5.0, w + learning_rate * (target - w))), 3)
     if insights is not None:
         new["insights"] = insights[:12]
