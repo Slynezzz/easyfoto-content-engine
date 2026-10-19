@@ -19,6 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import requests
 
+from . import brief
 from . import playbook as pbm
 from . import websearch
 from .config import Config
@@ -202,6 +203,8 @@ def run(cfg: Config, db: DB, ai: AI, today: date | None = None, now: datetime | 
     rules = "\n".join(f"- {r}" for r in pb.get("rules", []))
     known = "\n".join(f"- {v['pattern']}" for v in pb["hooks"].values())
     system = SYSTEM.format(rules=rules, formats=", ".join(pb["formats"]))
+    system += ("\n\nБРИФ ПРОДУКТА И АУДИТОРИИ — ищи то, что работает именно на эти сегменты "
+               "и ведёт к конверсии в бот:\n" + brief.load(cfg))
     prompt = (f"Сегодня {today:%d.%m.%Y}. Найди, что сейчас работает в коротких видео в нише "
               f"нейрофото и AI-фотосессий и в целом в Reels/Shorts.\n\nУже есть хуки:\n{known}")
     res, sources, method, failures = None, [], "", []

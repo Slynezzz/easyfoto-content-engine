@@ -17,11 +17,17 @@ from .video.templates import Script
 
 log = logging.getLogger(__name__)
 
-SYSTEM = """Ты — сценарист коротких вертикальных видео (Reels, Shorts) и SMM-копирайтер.
-Аккаунт: нейрофотограф. Автор показывает собственные фото, созданные его Telegram-ботом
-@{bot}: человек присылает свои селфи, выбирает сцену и получает новое фото в этой сцене.
-Цель каждого ролика: зритель досмотрел, оставил комментарий или сохранил, перешёл в бот
-по ссылке в профиле.
+SYSTEM = """Ты — сценарист коротких вертикальных видео (Reels, Shorts) и директ-маркетолог:
+вирусность, вовлечение и конверсия. Аккаунт: нейрофотограф. Автор показывает собственные фото,
+созданные его Telegram-ботом @{bot}.
+Главная цель каждого ролика — конверсия: зритель досмотрел, узнал в ролике свою ситуацию,
+переслал другу или сохранил, перешёл в бот по ссылке в профиле и сделал первое фото.
+
+Пиши для конкретного сегмента аудитории, указанного в задании: его ситуация, его боль, его
+желание, сними его возражение. Хук — про зрителя и его жизнь, а не про инструмент.
+
+БРИФ ПРОДУКТА И АУДИТОРИИ (источник правды о продукте; не выдумывай ничего сверх него):
+{brief}
 
 Правила, которые нельзя нарушать:
 {rules}
@@ -35,7 +41,7 @@ SCHEMA_HINT = """Схема ответа:
   "captions": ["подпись к кадру 1, до 22 символов", ... ровно {n} шт.],
   {scenes_hint}"cta_title": "финальный призыв, до 24 символов, одно ключевое слово в *звёздочках*",
   "cta_sub": "подзаголовок призыва, до 55 символов, упомянуть бот по ссылке в профиле",
-  "post_caption": "текст поста 250–700 символов: первая строка цепляет, дальше польза/история, вопрос для комментариев, призыв перейти в бот по ссылке в профиле",
+  "post_caption": "текст поста 250–700 символов: первая строка цепляет ситуацией сегмента; дальше короткая история или польза и снятие возражения; повод переслать ролик конкретному другу; вопрос для комментариев; призыв перейти в бот по ссылке в профиле",
   "hashtags": ["5–8 хештегов на русском и английском, с #"]
 }}"""
 
@@ -102,6 +108,9 @@ def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None
         f"Тема кадров: {theme['title']}." + (f" Примеры сцен темы: {'; '.join(theme['scenes'])}." if theme["scenes"] else ""),
         f"Кадров в ролике: {n}.",
         f"Стиль текста на видео: {pb.get('styles', {}).get(choice.style, {}).get('about', choice.style)}.",
+        *([f"Целевой сегмент аудитории: {pb['audiences'][choice.audience]['about']}. "
+           "Пиши для этих людей: их ситуация, боль, желание и возражение — по брифу."]
+          if choice.audience and choice.audience in pb.get("audiences", {}) else []),
         f"Автор: {'мужчина' if gender == 'male' else 'женщина'}, говорит от первого лица.",
     ]
     if choice.occasion:
@@ -158,7 +167,7 @@ def fallback(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None, bo
                f"Все кадры — мои, сделаны ботом @{bot} из обычных селфи. "
                "Присылаешь несколько своих фото, выбираешь сцену — получаешь новый кадр.\n\n"
                "Какой образ тебе ближе? Напиши номер в комментариях.\n"
-               "Попробовать бесплатно — бот по ссылке в профиле.")
+               "Опиши свою сцену — бот по ссылке в профиле.")
     script = asdict(Script(hook=_clip(pb["hooks"][choice.hook_id]["pattern"], LIMITS["hook"]), captions=captions))
     return Plan(choice=asdict(choice), script=script, post_caption=caption,
                 hashtags=["#нейрофотосессия", "#нейрофото", "#фотосессия", "#aiphoto", "#нейросеть"],
@@ -166,8 +175,10 @@ def fallback(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None, bo
 
 
 def plan(ai: AI, pb: dict, choice: Choice, n: int, *, photo_notes: list[str] | None = None,
-         generate_scenes: bool = False, gender: str = "male", bot: str = "Easyfotobot") -> Plan:
-    system = SYSTEM.format(bot=bot, rules="\n".join(f"- {r}" for r in pb.get("rules", [])))
+         generate_scenes: bool = False, gender: str = "male", bot: str = "Easyfotobot",
+         brief_text: str = "") -> Plan:
+    system = SYSTEM.format(bot=bot, brief=brief_text or "(бриф не задан)",
+                           rules="\n".join(f"- {r}" for r in pb.get("rules", [])))
     prompt = build_prompt(pb, choice, n, photo_notes, generate_scenes, gender)
     last_err: Exception | None = None
     for _ in range(2):

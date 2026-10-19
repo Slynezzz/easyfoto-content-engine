@@ -545,3 +545,95 @@ class OwnSearchTests(unittest.TestCase):
             with self.assertRaises(websearch.SearchError) as ctx:
                 websearch.Searcher("google_cse", "SECRETKEY", cx="c").search("q")
         self.assertNotIn("SECRETKEY", str(ctx.exception))
+
+
+class BriefTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cfg = Config(data_dir=Path(self._tmp.name))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_default_brief_has_slogan_and_segments(self):
+        from engine import brief
+        text = brief.load(self.cfg)
+        self.assertIn("не копируй готовое — создавай своё", text)
+        self.assertIn("Аудитория", text)
+        self.assertFalse(brief.is_custom(self.cfg))
+
+    def test_custom_brief_save_limits_and_reset(self):
+        from engine import brief
+        with self.assertRaises(ValueError):
+            brief.save(self.cfg, "коротко")
+        brief.save(self.cfg, "Мой бриф. " * 40)
+        self.assertTrue(brief.load(self.cfg).startswith("Мой бриф."))
+        brief.reset(self.cfg)
+        self.assertIn("Easyfotobot", brief.load(self.cfg))
+
+    def test_planner_writes_for_segment_with_brief(self):
+        pb = json.loads(pbm.DEFAULT_PATH.read_text(encoding="utf-8"))
+        choice = pbm.Choice("worlds", "eras", "eras", False, None, "clean", "experts")
+        seen = {}
+
+        class AIStub:
+            def json(self, system, prompt, images=None, temperature=0.9):
+                seen["system"], seen["prompt"] = system, prompt
+                raise AIError("down")
+        p = plan(AIStub(), pb, choice, 3, brief_text="БРИФ-МАРКЕР")
+        self.assertIn("БРИФ-МАРКЕР", seen["system"])
+        self.assertIn("конверсия", seen["system"])
+        self.assertIn("эксперты, самозанятые", seen["prompt"])
+        self.assertNotIn("бесплатно", p.post_caption.lower())
+
+    def test_audience_is_chosen_learned_and_migrated(self):
+        pb = json.loads(pbm.DEFAULT_PATH.read_text(encoding="utf-8"))
+        auds = {pbm.choose(pb, date(2026, 9, 10), rng=random.Random(i)).audience for i in range(80)}
+        self.assertEqual(auds, set(pb["audiences"]))
+        new = pbm.reweight(pb, {"audiences": {"experts": 2.0}})
+        self.assertGreater(new["audiences"]["experts"]["weight"], 1.0)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "pb.json"
+            old = dict(pb)
+            del old["audiences"]
+            path.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+            self.assertIn("profile_photo", pbm.load(path)["audiences"])
+
+    def test_scout_knows_the_brief(self):
+        db = DB(self.cfg.db_path)
+        ai = mock.Mock()
+        ai.gemini_style = "openai"
+        ai.research.side_effect = AIError("x")
+        ai.json.return_value = SCOUT_RES
+        self.cfg.google_api_key = ""
+        scout.run(self.cfg, db, ai, now=datetime(2026, 10, 20, tzinfo=timezone.utc))
+        system = ai.json.call_args.args[0]
+        self.assertIn("БРИФ ПРОДУКТА И АУДИТОРИИ", system)
+        self.assertIn("создавай своё", system)
+        db.close()
+
+
+class AdminBriefTests(unittest.TestCase):
+    def test_brief_upload_and_commands(self):
+        from engine.admin_bot import AdminBot, Services
+        tmp = Path(tempfile.mkdtemp())
+        cfg = Config(data_dir=tmp, admin_chat_id=1)
+        cfg.ensure_dirs()
+        db = DB(cfg.db_path)
+        sent = []
+        api = mock.Mock()
+        api.send_message.side_effect = lambda chat, text, markup=None: sent.append(text) or {"message_id": 1}
+        api.download.side_effect = lambda fid, dest: (dest.parent.mkdir(parents=True, exist_ok=True),
+                                                      dest.write_text("Новый бриф. " * 40, encoding="utf-8"))
+        bot = AdminBot(cfg, db, api, Services(make_one=lambda: 0, instagram_ready=lambda: False,
+                                              run_analysis=lambda: "", stats_text=lambda: ""))
+        msg = {"message_id": 5, "chat": {"id": 1, "type": "private"},
+               "document": {"file_id": "f", "file_name": "brief.md", "file_size": 500}, "caption": "бриф"}
+        bot.handle({"update_id": 1, "message": msg})
+        self.assertIn("Бриф обновлён", sent[-1])
+        bot.handle({"update_id": 2, "message": {"message_id": 6, "chat": {"id": 1, "type": "private"}, "text": "/brief"}})
+        self.assertIn("твой бриф", sent[-2])
+        self.assertTrue(sent[-1].startswith("Новый бриф."))
+        bot.handle({"update_id": 3, "message": {"message_id": 7, "chat": {"id": 1, "type": "private"}, "text": "/brief_reset"}})
+        self.assertFalse((tmp / "brief.md").exists())
+        db.close()

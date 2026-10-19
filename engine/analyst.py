@@ -82,7 +82,8 @@ def score_posts(rows: list[dict]) -> list[dict]:
 def arm_scores(scored: list[dict]) -> dict[str, dict[str, float]]:
     avg = mean(r["score"] for r in scored) or 1e-6
     out: dict[str, dict[str, float]] = {}
-    for dim, col in (("formats", "format"), ("hooks", "hook_id"), ("styles", "style"), ("themes", "theme")):
+    for dim, col in (("formats", "format"), ("hooks", "hook_id"), ("styles", "style"),
+                     ("audiences", "audience"), ("themes", "theme")):
         groups: dict[str, list[float]] = {}
         for r in scored:
             if r.get(col):
@@ -161,8 +162,10 @@ def report(old: dict, new: dict, scored: list[dict], summary: str) -> str:
         parts.append(summary)
     parts.append(f"Лучший: #{best['post_id']} ({best.get('plays') or 0} просмотров).")
     styles = {k: f"стиль {k}" for k in new.get("styles", {})}
+    audiences = {k: f"аудитория: {v['about'][:40]}" for k, v in new.get("audiences", {}).items()}
     changes = (_changes(old, new, "formats", {}) + _changes(old, new, "hooks", hooks)
-               + _changes(old, new, "styles", styles) + _changes(old, new, "themes", themes))
+               + _changes(old, new, "styles", styles) + _changes(old, new, "audiences", audiences)
+               + _changes(old, new, "themes", themes))
     parts.append("Изменения весов:\n" + ("\n".join(changes) if changes else "  без заметных изменений"))
     if new.get("insights"):
         parts.append("Выводы для сценариста:\n" + "\n".join(f"  — {x}" for x in new["insights"]))

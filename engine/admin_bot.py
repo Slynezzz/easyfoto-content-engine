@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import images
+from . import brief, images
 from .config import Config
 from .db import DB
 from .telegram import TelegramAPI, TelegramError
@@ -29,6 +29,7 @@ HELP = """Команды:
 /status — состояние системы
 /ai — проверить ключи и модели нейросетей
 /models — какие модели есть у посредников
+/brief — что система знает о продукте и аудитории (можно заменить своим)
 /trends — обновить тренды прямо сейчас
 /stats — статистика роликов
 /analyze — пересчитать плейбук по статистике
@@ -136,6 +137,7 @@ class AdminBot:
             f"тема: {post['theme']}",
             f"хук: {post['hook_id']}",
             f"стиль: {post['style']}" if post["style"] else "",
+            f"аудитория: {post['audience']}" if post["audience"] else "",
             "эксперимент" if post["explore"] else "",
         ) if x)
         when = f"\nПубликация: {post['scheduled_for']}" if post["scheduled_for"] else ""
@@ -223,6 +225,9 @@ class AdminBot:
             doc = msg["document"]
             name = (doc.get("file_name") or "").lower()
             ext = Path(name).suffix or ".jpg"
+            if ext in (".md", ".txt") and (msg.get("caption") or "").strip().lower().startswith("бриф"):
+                self.on_brief_file(doc)
+                return
             if ext not in images.IMAGE_EXT:
                 self.say("Это не фото. Принимаю jpg, png, webp.")
                 return
@@ -240,6 +245,32 @@ class AdminBot:
         # на альбом отвечаем один раз, а не на каждое фото
         if not msg.get("media_group_id") or msg.get("caption") is not None or total % 5 == 0:
             self.say(f"Сохранил. Сейчас в {label}: {total}.")
+
+    # -------------------------------------------------------------- brief
+    def on_brief_file(self, doc: dict) -> None:
+        if (doc.get("file_size") or 0) > 200_000:
+            self.say("Файл брифа слишком большой. Нужен обычный текст до 12 000 символов.")
+            return
+        tmp = self.cfg.data_dir / "work" / f"brief_{uuid.uuid4().hex[:8]}.txt"
+        try:
+            self.api.download(doc["file_id"], tmp)
+            text = tmp.read_text(encoding="utf-8", errors="replace")
+            brief.save(self.cfg, text)
+        except ValueError as e:
+            self.say(f"Бриф не сохранил: {e}")
+            return
+        finally:
+            tmp.unlink(missing_ok=True)
+        self.say(f"Бриф обновлён ({len(text)} символов). Сценарист и разведчик используют его со следующего ролика.")
+
+    def send_brief(self) -> None:
+        text = brief.load(self.cfg)
+        head = ("Сейчас используется твой бриф." if brief.is_custom(self.cfg)
+                else "Сейчас используется стандартный бриф.")
+        self.say(head + " Чтобы заменить — пришли файл .md или .txt с подписью «бриф». "
+                 "Вернуть стандартный — /brief_reset.")
+        for i in range(0, len(text), 3800):
+            self.say(text[i:i + 3800])
 
     # ------------------------------------------------------- moving files
     @staticmethod
@@ -333,6 +364,11 @@ class AdminBot:
         elif cmd == "/trends":
             self.say("Смотрю свежие тренды Reels и Shorts, это займёт около минуты…")
             self.run_bg(lambda: self.say(self.s.scout_trends()))
+        elif cmd == "/brief":
+            self.send_brief()
+        elif cmd == "/brief_reset":
+            brief.reset(self.cfg)
+            self.say("Вернул стандартный бриф.")
         elif cmd == "/move":
             self.move_last(args)
         elif cmd == "/scan":

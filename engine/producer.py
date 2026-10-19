@@ -7,7 +7,7 @@ import random
 import secrets
 from datetime import date
 
-from . import images, planner
+from . import brief, images, planner
 from . import playbook as pbm
 from .config import Config
 from .db import DB
@@ -35,6 +35,7 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
 
     photos: list = []
     plan: planner.Plan | None = None
+    brief_text = brief.load(cfg)
 
     if cfg.image_source in ("library", "mixed"):
         if images.untagged_count(db):
@@ -50,11 +51,11 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
             notes = [f"{r['title'] or 'образ без описания'} — {r['description'] or ''}".strip(" —")
                      for r in rows]
             plan = planner.plan(ai, pb, choice, len(rows), photo_notes=notes,
-                                gender=cfg.persona_gender, bot=cfg.bot_username)
+                                gender=cfg.persona_gender, bot=cfg.bot_username, brief_text=brief_text)
 
     if not photos and cfg.image_source in ("generate", "mixed") and images.pick_refs(db):
         plan = planner.plan(ai, pb, choice, n, generate_scenes=True,
-                            gender=cfg.persona_gender, bot=cfg.bot_username)
+                            gender=cfg.persona_gender, bot=cfg.bot_username, brief_text=brief_text)
         ids = []
         for scene in plan.scenes:
             try:
@@ -95,7 +96,7 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
     plan.choice = dataclasses.asdict(choice)
     return db.create_post(
         status="rendered", format=choice.format, hook_id=choice.hook_id, theme=choice.theme,
-        style=choice.style,
+        style=choice.style, audience=choice.audience,
         explore=int(choice.explore), script_json=plan.to_json(), asset_ids_json=asset_ids,
         video_path=str(video), cover_path=str(cover), caption=plan.full_caption(),
         media_token=token, scheduled_for=scheduled_for,

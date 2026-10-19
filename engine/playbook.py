@@ -25,6 +25,7 @@ class Choice:
     explore: bool
     occasion: str | None
     style: str = "clean"
+    audience: str = ""
 
 
 def load(path: Path) -> dict:
@@ -39,7 +40,7 @@ def load(path: Path) -> dict:
     return pb
 
 
-DIMS = ("formats", "hooks", "styles", "themes")
+DIMS = ("formats", "hooks", "styles", "audiences", "themes")
 
 
 def _merge_new(pb: dict, default: dict) -> bool:
@@ -123,7 +124,9 @@ def choose(pb: dict, today: date, explore_share: float = 0.3,
     occasion = seasons[0]["occasion"] if seasons else None
     style_w = {k: max(MIN_WEIGHT, v["weight"]) for k, v in pb.get("styles", {}).items()}
     style = _weighted(rng, style_w, explore) if style_w else "clean"
-    return Choice(fmt, hook, theme, explore, occasion, style)
+    aud_w = {k: max(MIN_WEIGHT, v["weight"]) for k, v in pb.get("audiences", {}).items()}
+    audience = _weighted(rng, aud_w, explore) if aud_w else ""
+    return Choice(fmt, hook, theme, explore, occasion, style, audience)
 
 
 def reweight(pb: dict, scores: dict[str, dict[str, float]], note: str = "",
