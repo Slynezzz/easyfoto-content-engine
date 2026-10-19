@@ -43,6 +43,11 @@ class Config:
     openai_text_model: str = field(default_factory=lambda: _env("OPENAI_TEXT_MODEL", "gpt-4.1-mini"))
     openai_image_model: str = field(default_factory=lambda: _env("OPENAI_IMAGE_MODEL", "gpt-image-1.5"))
 
+    # --- поиск для разведки трендов (ключ Google Cloud и id поисковика Programmable Search Engine)
+    google_api_key: str = field(default_factory=lambda: _env("GOOGLE_API_KEY"))
+    google_cse_cx: str = field(default_factory=lambda: _env("GOOGLE_CSE_CX"))
+    google_research_model: str = field(default_factory=lambda: _env("GOOGLE_RESEARCH_MODEL", "gemini-2.5-flash"))
+
     # --- откуда брать фото для роликов: library (готовые), generate (новые), mixed
     image_source: str = field(default_factory=lambda: _env("IMAGE_SOURCE", "library"))
     persona_gender: str = field(default_factory=lambda: _env("PERSONA_GENDER", "male"))  # male | female

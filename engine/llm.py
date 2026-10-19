@@ -46,13 +46,6 @@ MODEL_TROUBLE = re.compile(
     r"temporarily unavailable|model[^.;]{0,60}(not found|not exist|does not exist|unavailable|"
     r"not available|not supported|is not supported)", re.I)
 
-# Порядок предпочтения текстовых моделей; дальше — любые подходящие из списка посредника.
-TEXT_PREFS = {
-    "gemini": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-flash-latest",
-               "gemini-3-flash-preview", "gemini-3-flash", "gemini-2.5-pro", "gemini-3-pro-preview"],
-    "openai": ["gpt-4.1-mini", "gpt-4o-mini", "gpt-5-mini", "gpt-4.1", "gpt-4o", "gpt-5",
-               "gpt-4.1-nano", "gpt-5-nano"],
-}
 NOT_TEXT = ("image", "embed", "tts", "audio", "whisper", "dall", "realtime", "transcri", "moderation",
             "imagen", "veo", "live", "search", "computer", "sora", "speech", "aqa")
 
@@ -62,13 +55,21 @@ def rank_text_models(provider: str, ids: list[str]) -> list[str]:
     family = "gemini" if provider == "gemini" else "gpt"
     usable = [m for m in dict.fromkeys(ids)
               if family in m.lower() and not any(x in m.lower() for x in NOT_TEXT)]
-    ordered = []
-    for pref in TEXT_PREFS[provider]:
-        ordered += [m for m in usable if (m == pref or m.endswith("/" + pref)) and m not in ordered]
-    # остальное: сначала быстрые и дешёвые (flash, mini), потом прочие
-    rest = sorted((m for m in usable if m not in ordered),
-                  key=lambda m: (not any(x in m.lower() for x in ("flash", "mini")), m))
-    return ordered + rest
+    # Сначала быстрые и дешёвые (flash, mini) свежих версий, потом облегчённые, потом тяжёлые.
+    # Без жёсткого списка названий — чтобы движок не устаревал вместе с моделями.
+    return sorted(usable, key=_speed_rank)
+
+
+_FAST = re.compile(r"(^|[-_/.])(flash|mini)([-_.]|$)", re.I)   # отдельным словом: «gemini» не считается
+_LITE = re.compile(r"(^|[-_/.])(lite|nano)([-_.]|$)", re.I)
+_VERSION = re.compile(r"(\d+(?:\.\d+)?)")
+
+
+def _speed_rank(model: str) -> tuple:
+    name = model.split("/")[-1]
+    m = _VERSION.search(name)
+    version = float(m.group(1)) if m else 0.0
+    return (not _FAST.search(name), bool(_LITE.search(name)), -version, name)
 
 
 @dataclass
@@ -341,36 +342,41 @@ class AI:
             raise AIError(f"неожиданный ответ: {str(data)[:200]}") from None
 
     def research(self, system: str, prompt: str, temperature: float = 0.4) -> tuple[dict | list, list[dict]]:
-        """Запрос к Gemini с поиском Google. Возвращает (JSON из ответа, источники).
+        """Запрос к Gemini со встроенным поиском Google. Возвращает (JSON, источники).
 
-        Поиск работает только у Gemini; у OpenAI в этом режиме нет доступа к
-        свежему интернету, поэтому запасного провайдера здесь нет.
+        Поиск Google есть только в формате Google, поэтому пробуем по очереди:
+          1. основной Gemini (если посредник или Google принимает формат Google);
+          2. Gemini напрямую у Google по отдельному ключу GOOGLE_API_KEY.
+        Если не вышло — AIError с причинами; разведчик тогда ищет сам (scout.py).
         """
-        if not self.cfg.gemini_api_key:
-            raise AIError("для разведки трендов нужен GEMINI_API_KEY (поиск Google есть только у Gemini)")
-        if self.gemini_style == "openai":
-            raise AIError("посредник Gemini принимает запросы только в формате OpenAI, а поиск Google "
-                          "доступен лишь в формате Google — разведка трендов через этот адрес недоступна")
         body = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "tools": [{"google_search": {}}],
             "generationConfig": {"temperature": temperature},
         }
-        try:
-            data = self._gemini_native(body, self.models["gemini"], timeout=180)
-        except _SwitchToOpenAI:
-            return self.research(system, prompt, temperature)
-        text = "".join(p.get("text", "") for p in _gemini_parts(data))
-        meta = (data.get("candidates") or [{}])[0].get("groundingMetadata") or {}
-        sources, seen = [], set()
-        for ch in meta.get("groundingChunks") or []:
-            web = ch.get("web") or {}
-            uri = web.get("uri")
-            if uri and uri not in seen:
-                seen.add(uri)
-                sources.append({"title": web.get("title") or uri, "uri": uri})
-        return parse_json(text), sources
+        errors = []
+        if self.cfg.gemini_api_key and self.gemini_style != "openai":
+            try:
+                return _grounded(self._gemini_native(body, self.models["gemini"], timeout=180))
+            except _SwitchToOpenAI:
+                errors.append("посредник Gemini работает только в формате OpenAI, без поиска Google")
+            except AIError as e:
+                errors.append(f"основной Gemini: {e}")
+        elif self.gemini_style == "openai":
+            errors.append("посредник Gemini работает только в формате OpenAI, без поиска Google")
+        google_key = getattr(self.cfg, "google_api_key", "")
+        if google_key:
+            model = getattr(self.cfg, "google_research_model", "") or "gemini-2.5-flash"
+            try:
+                data = _post(f"{DEFAULT_GEMINI_BASE}/v1beta/models/{model}:generateContent",
+                             headers={"x-goog-api-key": google_key}, json=body, timeout=180)
+                return _grounded(data)
+            except AIError as e:
+                errors.append(f"Gemini напрямую по GOOGLE_API_KEY: {e}")
+        else:
+            errors.append("GOOGLE_API_KEY не задан")
+        raise AIError("; ".join(errors))
 
     def check(self) -> list[str]:
         """Проверка ключей и моделей: по строке на каждого провайдера."""
@@ -396,6 +402,10 @@ class AI:
                 out.append(f"✅ {name}: отвечает (модель {used}, {host}{fmt}{auto})")
             except (AIError, KeyError, ValueError) as e:
                 out.append(f"❌ {name} (модель {model}, {host}): {str(e)[:300]}")
+        cse = bool(getattr(self.cfg, "google_api_key", "") and getattr(self.cfg, "google_cse_cx", ""))
+        out.append("Поиск для разведки трендов: " + (
+            "ключ и поисковик Google заданы (проверка — командой /trends)" if cse
+            else "не настроен — задай GOOGLE_API_KEY и GOOGLE_CSE_CX"))
         return out
 
     # ---------------------------------------------------------- картинки
@@ -454,6 +464,20 @@ class AI:
         if not item.get("b64_json"):
             raise AIRefused("OpenAI не вернул изображение")
         return ImageResult(base64.b64decode(item["b64_json"]), "image/png", "openai")
+
+
+def _grounded(data: dict) -> tuple[dict | list, list[dict]]:
+    """Текст ответа и источники поиска Google из ответа Gemini."""
+    text = "".join(p.get("text", "") for p in _gemini_parts(data))
+    meta = (data.get("candidates") or [{}])[0].get("groundingMetadata") or {}
+    sources, seen = [], set()
+    for ch in meta.get("groundingChunks") or []:
+        web = ch.get("web") or {}
+        uri = web.get("uri")
+        if uri and uri not in seen:
+            seen.add(uri)
+            sources.append({"title": web.get("title") or uri, "uri": uri})
+    return parse_json(text), sources
 
 
 class _SwitchToOpenAI(Exception):
