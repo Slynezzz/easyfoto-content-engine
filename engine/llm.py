@@ -130,6 +130,51 @@ class AI:
         data = _post(OPENAI_CHAT_URL, headers={"Authorization": f"Bearer {self.cfg.openai_api_key}"}, json=body)
         return parse_json(data["choices"][0]["message"]["content"])
 
+    def research(self, system: str, prompt: str, temperature: float = 0.4) -> tuple[dict | list, list[dict]]:
+        """Запрос к Gemini с поиском Google. Возвращает (JSON из ответа, источники).
+
+        Поиск работает только у Gemini; у OpenAI в этом режиме нет доступа к
+        свежему интернету, поэтому запасного провайдера здесь нет.
+        """
+        if not self.cfg.gemini_api_key:
+            raise AIError("для разведки трендов нужен GEMINI_API_KEY (поиск Google есть только у Gemini)")
+        body = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"temperature": temperature},
+        }
+        data = _post(GEMINI_URL.format(model=self.cfg.gemini_text_model),
+                     headers={"x-goog-api-key": self.cfg.gemini_api_key}, json=body, timeout=180)
+        text = "".join(p.get("text", "") for p in _gemini_parts(data))
+        meta = (data.get("candidates") or [{}])[0].get("groundingMetadata") or {}
+        sources, seen = [], set()
+        for ch in meta.get("groundingChunks") or []:
+            web = ch.get("web") or {}
+            uri = web.get("uri")
+            if uri and uri not in seen:
+                seen.add(uri)
+                sources.append({"title": web.get("title") or uri, "uri": uri})
+        return parse_json(text), sources
+
+    def check(self) -> list[str]:
+        """Проверка ключей и моделей: по строке на каждого провайдера."""
+        out = []
+        probe = ('Ответь JSON {"ok": true}', "проверка связи")
+        for name, key, fn, model in (
+            ("Gemini", self.cfg.gemini_api_key, self._gemini_json, self.cfg.gemini_text_model),
+            ("OpenAI", self.cfg.openai_api_key, self._openai_json, self.cfg.openai_text_model),
+        ):
+            if not key:
+                out.append(f"{name}: ключ не задан")
+                continue
+            try:
+                fn(*probe, [], 0.0)
+                out.append(f"✅ {name}: отвечает (модель {model})")
+            except (AIError, KeyError, ValueError) as e:
+                out.append(f"❌ {name} (модель {model}): {str(e)[:300]}")
+        return out
+
     # ---------------------------------------------------------- картинки
     def image(self, prompt: str, refs: list[str | Path]) -> ImageResult:
         """Генерация фото по референсам. Gemini, при сбое — OpenAI."""

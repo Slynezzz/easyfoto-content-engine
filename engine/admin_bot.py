@@ -27,6 +27,8 @@ HELP = """Команды:
 /make — собрать ролик прямо сейчас
 /queue — что ждёт одобрения и публикации
 /status — состояние системы
+/ai — проверить ключи и модели нейросетей
+/trends — обновить тренды прямо сейчас
 /stats — статистика роликов
 /analyze — пересчитать плейбук по статистике
 /pause и /resume — остановить или включить автопубликацию
@@ -49,6 +51,8 @@ class Services:
     instagram_ready: Callable[[], bool]
     run_analysis: Callable[[], str]
     stats_text: Callable[[], str]
+    check_ai: Callable[[], str] = lambda: "Проверка нейросетей недоступна"
+    scout_trends: Callable[[], str] = lambda: "Разведчик трендов недоступен"
 
 
 def approval_keyboard(post_id: int) -> dict:
@@ -129,11 +133,16 @@ class AdminBot:
             FORMAT_RU.get(post["format"], post["format"]),
             f"тема: {post['theme']}",
             f"хук: {post['hook_id']}",
+            f"стиль: {post['style']}" if post["style"] else "",
             "эксперимент" if post["explore"] else "",
         ) if x)
         when = f"\nПубликация: {post['scheduled_for']}" if post["scheduled_for"] else ""
-        caption = (f"#{post_id} · {tags}{when}\n\n"
-                   f"Хук: {plan['script']['hook']}\n\n{plan['post_caption'][:600]}")
+        warn = ""
+        if plan.get("llm_ok") is False:
+            warn = (f"⚠️ Нейросеть не ответила, тексты по запасному шаблону.\n"
+                    f"Причина: {(plan.get('llm_error') or 'неизвестна')[:200]}\n\n")
+        caption = (f"{warn}#{post_id} · {tags}{when}\n\n"
+                   f"Хук: {plan['script']['hook'].replace('*', '')}\n\n{plan['post_caption'][:600]}")
         try:
             msg = self.api.send_video(self.admin, post["video_path"], caption,
                                       approval_keyboard(post_id), cover=post["cover_path"])
@@ -313,6 +322,12 @@ class AdminBot:
         elif cmd == "/resume":
             self.db.set("paused", "0")
             self.say("▶️ Автопубликация включена.")
+        elif cmd == "/ai":
+            self.say("Проверяю нейросети…")
+            self.run_bg(lambda: self.say(self.s.check_ai()))
+        elif cmd == "/trends":
+            self.say("Смотрю свежие тренды Reels и Shorts, это займёт около минуты…")
+            self.run_bg(lambda: self.say(self.s.scout_trends()))
         elif cmd == "/move":
             self.move_last(args)
         elif cmd == "/scan":
@@ -339,6 +354,8 @@ class AdminBot:
             f"Источник фото: {self.cfg.image_source}",
             f"Библиотека: {lib['n'] or 0} фото, размечено {lib['t'] or 0}",
             f"Селфи «до»: {len(self.db.assets('before'))}, референсов: {len(self.db.assets('ref'))}",
+            f"Нейросеть: {'⚠️ ' + self.db.get('last_ai_error') if self.db.get('last_ai_error') else 'отвечает'}"
+            if self.db.get("last_ai_error") is not None else "Нейросеть: ещё не вызывалась",
             *([f"⚠️ Последняя ошибка разметки: {self.db.get('last_tag_error')}"]
               if self.db.get("last_tag_error") else []),
             "Посты: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "пока нет"),

@@ -24,15 +24,38 @@ class Choice:
     theme: str
     explore: bool
     occasion: str | None
+    style: str = "clean"
 
 
 def load(path: Path) -> dict:
     """Рабочая копия плейбука; при первом запуске — копия стандартного."""
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    pb = json.loads(DEFAULT_PATH.read_text(encoding="utf-8"))
-    save(path, pb)
+    default = json.loads(DEFAULT_PATH.read_text(encoding="utf-8"))
+    if not path.exists():
+        save(path, default)
+        return default
+    pb = json.loads(path.read_text(encoding="utf-8"))
+    if _merge_new(pb, default):
+        save(path, pb)
     return pb
+
+
+DIMS = ("formats", "hooks", "styles", "themes")
+
+
+def _merge_new(pb: dict, default: dict) -> bool:
+    """Добавляет в рабочий плейбук разделы и варианты, появившиеся в новой
+    версии кода. Веса и выводы, накопленные аналитиком, не трогает."""
+    changed = False
+    for key, val in default.items():
+        if key not in pb:
+            pb[key] = val
+            changed = True
+    for dim in DIMS:
+        for k, v in default.get(dim, {}).items():
+            if k not in pb[dim]:
+                pb[dim][k] = v
+                changed = True
+    return changed
 
 
 def save(path: Path, pb: dict) -> None:
@@ -98,7 +121,9 @@ def choose(pb: dict, today: date, explore_share: float = 0.3,
 
     theme = _weighted(rng, theme_weights(pb, today), explore)
     occasion = seasons[0]["occasion"] if seasons else None
-    return Choice(fmt, hook, theme, explore, occasion)
+    style_w = {k: max(MIN_WEIGHT, v["weight"]) for k, v in pb.get("styles", {}).items()}
+    style = _weighted(rng, style_w, explore) if style_w else "clean"
+    return Choice(fmt, hook, theme, explore, occasion, style)
 
 
 def reweight(pb: dict, scores: dict[str, dict[str, float]], note: str = "",
@@ -111,9 +136,9 @@ def reweight(pb: dict, scores: dict[str, dict[str, float]], note: str = "",
     """
     new = copy.deepcopy(pb)
     base = json.loads(DEFAULT_PATH.read_text(encoding="utf-8"))
-    for dim in ("formats", "hooks", "themes"):
+    for dim in DIMS:
         for key, score in scores.get(dim, {}).items():
-            if key not in new[dim]:
+            if key not in new.get(dim, {}):
                 continue
             w = new[dim][key]["weight"]
             # Цель считается от исходного веса, а не от текущего: при тех же

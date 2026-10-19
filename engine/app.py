@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import analyst, images, playbook as pbm, server
+from . import analyst, images, playbook as pbm, scout, server
 from .admin_bot import AdminBot, Services, retry_keyboard
 from .config import Config
 from .db import DB
@@ -183,6 +183,27 @@ class Engine:
     def job_metrics(self) -> int:
         return self.ig.collect_all() if self.ig.ready() else 0
 
+    def job_scout(self) -> bool:
+        """Разведка трендов: при первом запуске и затем по понедельникам с 9:00 (до анализа в 10)."""
+        if not self.cfg.gemini_api_key:
+            return False
+        now = self.now()
+        if self.db.get("scout_last"):
+            if now.weekday() != 0 or now.hour < 9:
+                return False
+            if not self._once(f"scout:{now:%G-W%V}"):
+                return False
+        report = scout.run(self.cfg, self.db, self.ai, today=now.date())
+        if report.startswith("⚠️"):
+            # без успешной разведки повторяем раз в час, но о той же ошибке говорим один раз
+            if self.db.get("last_scout_error") != report:
+                self.say(report)
+            self.db.set("last_scout_error", report)
+            return False
+        self.db.set("last_scout_error", "")
+        self.say(report)
+        return True
+
     def job_analysis(self) -> bool:
         now = self.now()
         if now.weekday() != 0 or now.hour < 10:
@@ -230,6 +251,7 @@ class Engine:
             ("push", timedelta(minutes=5), self.job_push),
             ("publish", timedelta(seconds=30), self.job_publish),
             ("metrics", timedelta(hours=6), self.job_metrics),
+            ("scout", timedelta(hours=1), self.job_scout),
             ("analysis", timedelta(hours=1), self.job_analysis),
             ("token", timedelta(days=7) if self.db.get("ig_token_seen_at") else timedelta(days=2), self.job_token),
             ("cleanup", timedelta(hours=12), self.job_cleanup),
@@ -267,6 +289,8 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
             instagram_ready=ig.ready,
             run_analysis=lambda: analyst.run(cfg, db, ai),
             stats_text=lambda: analyst.stats_text(db),
+            check_ai=lambda: "\n".join(ai.check()),
+            scout_trends=lambda: scout.run(cfg, db, ai),
         ))
         engine.bot = bot
     engine.recover()

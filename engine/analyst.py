@@ -82,10 +82,11 @@ def score_posts(rows: list[dict]) -> list[dict]:
 def arm_scores(scored: list[dict]) -> dict[str, dict[str, float]]:
     avg = mean(r["score"] for r in scored) or 1e-6
     out: dict[str, dict[str, float]] = {}
-    for dim, col in (("formats", "format"), ("hooks", "hook_id"), ("themes", "theme")):
+    for dim, col in (("formats", "format"), ("hooks", "hook_id"), ("styles", "style"), ("themes", "theme")):
         groups: dict[str, list[float]] = {}
         for r in scored:
-            groups.setdefault(r[col], []).append(r["score"])
+            if r.get(col):
+                groups.setdefault(r[col], []).append(r["score"])
         out[dim] = {k: round(mean(v) / avg, 3) for k, v in groups.items() if len(v) >= MIN_PER_ARM}
     return out
 
@@ -140,7 +141,10 @@ def run(cfg: Config, db: DB, ai: AI | None) -> str:
 
 def _changes(old: dict, new: dict, dim: str, label: dict[str, str]) -> list[str]:
     out = []
-    for k, v in new[dim].items():
+    for k, v in new.get(dim, {}).items():
+        if k not in old.get(dim, {}):
+            out.append(f"  + новый вариант: {label.get(k, k)}")
+            continue
         was = old[dim][k]["weight"]
         if abs(v["weight"] - was) >= 0.02:
             arrow = "▲" if v["weight"] > was else "▼"
@@ -156,8 +160,9 @@ def report(old: dict, new: dict, scored: list[dict], summary: str) -> str:
     if summary:
         parts.append(summary)
     parts.append(f"Лучший: #{best['post_id']} ({best.get('plays') or 0} просмотров).")
+    styles = {k: f"стиль {k}" for k in new.get("styles", {})}
     changes = (_changes(old, new, "formats", {}) + _changes(old, new, "hooks", hooks)
-               + _changes(old, new, "themes", themes))
+               + _changes(old, new, "styles", styles) + _changes(old, new, "themes", themes))
     parts.append("Изменения весов:\n" + ("\n".join(changes) if changes else "  без заметных изменений"))
     if new.get("insights"):
         parts.append("Выводы для сценариста:\n" + "\n".join(f"  — {x}" for x in new["insights"]))

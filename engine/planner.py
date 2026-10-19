@@ -31,9 +31,9 @@ SYSTEM = """Ты — сценарист коротких вертикальны�
 
 SCHEMA_HINT = """Схема ответа:
 {{
-  "hook": "заголовок на первые 2 секунды, до 60 символов, по мотивам паттерна хука",
+  "hook": "заголовок на первые 2 секунды, до 60 символов, по мотивам паттерна хука; 1–2 ключевых слова оберни в *звёздочки* — они будут выделены цветом",
   "captions": ["подпись к кадру 1, до 22 символов", ... ровно {n} шт.],
-  {scenes_hint}"cta_title": "финальный призыв, до 24 символов",
+  {scenes_hint}"cta_title": "финальный призыв, до 24 символов, одно ключевое слово в *звёздочках*",
   "cta_sub": "подзаголовок призыва, до 55 символов, упомянуть бот по ссылке в профиле",
   "post_caption": "текст поста 250–700 символов: первая строка цепляет, дальше польза/история, вопрос для комментариев, призыв перейти в бот по ссылке в профиле",
   "hashtags": ["5–8 хештегов на русском и английском, с #"]
@@ -53,6 +53,7 @@ class Plan:
     post_caption: str = ""
     hashtags: list[str] = field(default_factory=list)
     llm_ok: bool = True
+    llm_error: str = ""
 
     def to_script(self) -> Script:
         return Script(**self.script)
@@ -75,11 +76,19 @@ def theme_info(pb: dict, theme: str) -> dict:
 
 
 def _clip(text: str, limit: int) -> str:
+    """Обрезает по словам. Длина считается без *звёздочек* выделения;
+    непарная звёздочка после обрезки убирается."""
     text = " ".join(str(text or "").split())
-    if len(text) <= limit:
-        return text
-    cut = text[:limit].rsplit(" ", 1)[0]
-    return cut.rstrip(",.;:—-") + "…" if cut else text[:limit]
+    if len(text.replace("*", "")) > limit:
+        words, out = text.split(" "), []
+        for w in words:
+            if len(" ".join(out + [w]).replace("*", "")) > limit:
+                break
+            out.append(w)
+        text = (" ".join(out).rstrip(",.;:—-") + "…") if out else text[:limit]
+    if text.count("*") % 2:
+        text = " ".join(text.replace("*", "").split())
+    return text
 
 
 def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None,
@@ -92,6 +101,7 @@ def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None
         f"Паттерн хука: «{hook['pattern']}» (идея: {hook['idea']}). Перепиши своими словами под тему, сохрани механику.",
         f"Тема кадров: {theme['title']}." + (f" Примеры сцен темы: {'; '.join(theme['scenes'])}." if theme["scenes"] else ""),
         f"Кадров в ролике: {n}.",
+        f"Стиль текста на видео: {pb.get('styles', {}).get(choice.style, {}).get('about', choice.style)}.",
         f"Автор: {'мужчина' if gender == 'male' else 'женщина'}, говорит от первого лица.",
     ]
     if choice.occasion:
@@ -99,6 +109,9 @@ def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None
     if photo_notes:
         lines.append("Фото уже готовы, подписи должны им соответствовать, по порядку:")
         lines += [f"  {i + 1}. {note}" for i, note in enumerate(photo_notes)]
+    if pb.get("trend_notes"):
+        lines.append("Что сейчас в тренде в Reels и Shorts (свежая разведка, используй, если уместно):")
+        lines += [f"  — {x}" for x in pb["trend_notes"]]
     if pb.get("insights"):
         lines.append("Что мы уже знаем по статистике аккаунта:")
         lines += [f"  — {x}" for x in pb["insights"]]
@@ -130,7 +143,7 @@ def validate(raw: dict, choice: Choice, pb: dict, n: int, generate_scenes: bool)
         cta_title=_clip(raw.get("cta_title") or "Хочешь так же?", LIMITS["cta_title"]),
         cta_sub=_clip(raw.get("cta_sub") or "Бот-нейрофотограф — по ссылке в профиле", LIMITS["cta_sub"]),
     ))
-    caption = str(raw.get("post_caption") or "").strip()[: LIMITS["post_caption"]]
+    caption = str(raw.get("post_caption") or "").replace("*", "").strip()[: LIMITS["post_caption"]]
     if len(caption) < 40:
         raise AIError("слишком короткий текст поста")
     return Plan(choice=asdict(choice), script=script, scenes=scenes, post_caption=caption, hashtags=tags)
@@ -167,4 +180,6 @@ def plan(ai: AI, pb: dict, choice: Choice, n: int, *, photo_notes: list[str] | N
         # Без описаний сцен генерировать нечего — пусть решает вызывающий код.
         raise AIError(f"планировщик не смог составить сцены: {last_err}")
     log.error("planner fallback: %s", last_err)
-    return fallback(pb, choice, n, photo_notes, bot)
+    fb = fallback(pb, choice, n, photo_notes, bot)
+    fb.llm_error = str(last_err)[:300]
+    return fb

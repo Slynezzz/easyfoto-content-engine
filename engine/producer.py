@@ -79,10 +79,12 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
 
     paths = [p["path"] for p in photos]
     script = plan.to_script()
+    script.style = choice.style
     fmt = FORMATS[choice.format]
     seed = rng.randrange(1 << 30)
     spec = fmt(before["path"], paths, script, music_seed=seed) if before else fmt(paths, script, music_seed=seed)
 
+    db.set("last_ai_error", "" if plan.llm_ok else plan.llm_error or "нейросеть не ответила")
     token = secrets.token_urlsafe(18)
     video = cfg.media_dir / f"{token}.mp4"
     cover = cfg.media_dir / f"{token}.jpg"
@@ -93,6 +95,7 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
     plan.choice = dataclasses.asdict(choice)
     return db.create_post(
         status="rendered", format=choice.format, hook_id=choice.hook_id, theme=choice.theme,
+        style=choice.style,
         explore=int(choice.explore), script_json=plan.to_json(), asset_ids_json=asset_ids,
         video_path=str(video), cover_path=str(cover), caption=plan.full_caption(),
         media_token=token, scheduled_for=scheduled_for,

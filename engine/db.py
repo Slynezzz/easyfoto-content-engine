@@ -92,6 +92,9 @@ class DB:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(assets)")}
         if "tag_attempts" not in cols:
             self._conn.execute("ALTER TABLE assets ADD COLUMN tag_attempts INTEGER NOT NULL DEFAULT 0")
+        pcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(posts)")}
+        if "style" not in pcols:
+            self._conn.execute("ALTER TABLE posts ADD COLUMN style TEXT")
         if "tg_message_id" not in cols:
             self._conn.execute("ALTER TABLE assets ADD COLUMN tg_message_id INTEGER")
 
@@ -188,7 +191,7 @@ class DB:
     def latest_metrics(self) -> list[sqlite3.Row]:
         """Последний снимок метрик по каждому опубликованному посту."""
         return self.q(
-            """SELECT p.id, p.format, p.hook_id, p.theme, p.explore, p.published_at, m.*
+            """SELECT p.id, p.format, p.hook_id, p.theme, p.style, p.explore, p.published_at, m.*
                FROM posts p JOIN metrics m ON m.post_id = p.id
                WHERE m.collected_at = (SELECT MAX(collected_at) FROM metrics WHERE post_id = p.id)
                ORDER BY p.id"""

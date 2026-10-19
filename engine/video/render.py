@@ -44,6 +44,7 @@ class Overlay:
     end: float | None = None    # None = до конца сегмента
     anim: str = "pop"           # pop | fade | slide_up | none
     x: int | None = None        # None = по центру безопасной зоны
+    fade_out: bool = True       # False — исчезает мгновенно (кадры «появления по словам»)
 
 
 @dataclass
@@ -153,7 +154,7 @@ def _overlay_alpha_scale(ov: Overlay, t: float, seg_dur: float) -> tuple[float, 
     if t < ov.start or t > end:
         return 0.0, 1.0, 0.0
     local = t - ov.start
-    out = min(1.0, (end - t) / 0.15) if ov.end is not None else 1.0
+    out = min(1.0, (end - t) / 0.15) if (ov.end is not None and ov.fade_out) else 1.0
     if ov.anim == "pop":
         k = min(1.0, local / 0.28)
         # пружинка: 0.6 -> 1.06 -> 1.0
