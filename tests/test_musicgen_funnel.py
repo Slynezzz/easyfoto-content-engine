@@ -122,7 +122,7 @@ class FunnelTests(unittest.TestCase):
         conn = mock.Mock()
         conn.cursor.return_value = FakeCursor()
         fake = types.SimpleNamespace(connect=mock.Mock(return_value=conn), Error=Exception)
-        cfg = Config(bot_database_url="postgres://x", bot_username="Easyfotobot")
+        cfg = Config(bot_database_url="postgresql://engine_ro:pw@h.proxy.rlwy.net:5/railway", bot_username="Easyfotobot")
         with mock.patch.dict(sys.modules, {"psycopg2": fake}):
             text = funnel.report(cfg, 30)
         self.assertIn("default_transaction_read_only=on", fake.connect.call_args.kwargs["options"])
