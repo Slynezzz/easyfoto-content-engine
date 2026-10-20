@@ -43,6 +43,7 @@ class MusicGenTests(unittest.TestCase):
         self.assertEqual(body["music_length_ms"], 16500)
         self.assertIn("trap", body["prompt"])
         self.assertEqual(post.call_args.kwargs["headers"]["xi-api-key"], "xi")
+        self.assertNotIn("Authorization", post.call_args.kwargs["headers"])  # ElevenLabs: только один заголовок
         self.assertTrue(path.exists())
         self.assertEqual(path.parent.name, "mystic")
         self.assertIn(path, music.tracks(self.cfg)["mystic"])

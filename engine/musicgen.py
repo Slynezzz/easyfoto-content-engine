@@ -88,8 +88,10 @@ def generate(cfg: Config, db: DB, style: str, folder: str, seconds: float,
     length_ms = int(min(60, max(10, seconds + 2)) * 1000)
     body = {"prompt": PROMPT.format(style=style), "music_length_ms": length_ms,
             "model_id": cfg.music_model, "force_instrumental": True}
-    headers = {"xi-api-key": cfg.music_api_key, "Authorization": f"Bearer {cfg.music_api_key}",
-               "Content-Type": "application/json"}
+    # ElevenLabs принимает ровно один заголовок с ключом; посредники обычно ждут Bearer
+    auth = ({"xi-api-key": cfg.music_api_key} if "elevenlabs.io" in cfg.music_api_base_url
+            else {"Authorization": f"Bearer {cfg.music_api_key}"})
+    headers = {**auth, "Content-Type": "application/json"}
     try:
         r = requests.post(f"{cfg.music_api_base_url}/v1/music", json=body, headers=headers,
                           params={"output_format": "mp3_44100_128"}, timeout=240)
