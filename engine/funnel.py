@@ -17,6 +17,8 @@ from .config import Config
 
 log = logging.getLogger(__name__)
 
+# Покупками считаются только оплаты картой и звёздами: бот пишет в ту же таблицу
+# бесплатные стартовые генерации (free), бонусы за друзей (referral) и начисления админа.
 # метки для шапок профилей; у каждой площадки своя, чтобы видеть, откуда пришли
 SOURCES = {"ig": "Instagram", "vk": "VK", "yt": "YouTube", "tg": "Telegram", "tt": "TikTok"}
 
@@ -94,8 +96,8 @@ BY_SOURCE = """
 SELECT COALESCE(u.utm_source, '?'), COALESCE(u.utm_medium, ''), COALESCE(u.utm_campaign, ''),
        COUNT(*),
        COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM generated_photos g WHERE g.user_id = u.user_id)),
-       COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM package_purchases p WHERE p.user_id = u.user_id)),
-       COALESCE(SUM((SELECT SUM(p.amount_rub) FROM package_purchases p WHERE p.user_id = u.user_id)), 0)
+       COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM package_purchases p WHERE p.user_id = u.user_id AND p.payment_method IN ('card', 'stars'))),
+       COALESCE(SUM((SELECT SUM(p.amount_rub) FROM package_purchases p WHERE p.user_id = u.user_id AND p.payment_method IN ('card', 'stars'))), 0)
 FROM user_utm u
 WHERE u.registered_at >= NOW() - %s * INTERVAL '1 day'
 GROUP BY 1, 2, 3
@@ -106,7 +108,7 @@ LIMIT 25
 TOTAL = """
 SELECT COUNT(*),
        COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM generated_photos g WHERE g.user_id = d.user_id)),
-       COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM package_purchases p WHERE p.user_id = d.user_id))
+       COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM package_purchases p WHERE p.user_id = d.user_id AND p.payment_method IN ('card', 'stars')))
 FROM user_data d
 WHERE d.first_seen >= NOW() - %s * INTERVAL '1 day'
 """

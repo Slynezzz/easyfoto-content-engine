@@ -131,6 +131,8 @@ class FunnelTests(unittest.TestCase):
         self.assertIn("Instagram bio: 25 → 15 → 2, 980 ₽", text)
         self.assertIn("VK clip p12: 5 → 1 → 0", text)
         conn.close.assert_called_once()
+        self.assertIn("payment_method IN ('card', 'stars')", funnel.TOTAL)
+        self.assertEqual(funnel.BY_SOURCE.count("payment_method IN ('card', 'stars')"), 2)
 
     def test_broken_url_explained(self):
         bad = "postgresql://engine_ro:p@postgresql://${{PGUSER}}:${{PGPASSWORD}}@${{RAILWAY_TCP_PROXY_DOMAIN}}/railway"
