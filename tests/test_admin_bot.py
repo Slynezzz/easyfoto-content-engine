@@ -283,6 +283,14 @@ class AdminBotTests(unittest.TestCase):
         self.assertEqual(len(got), 1)
         self.assertEqual(self.api.texts()[-1], "✅ VK подключён")
 
+    def test_vk_ru_token_and_authorize_link_hint(self):
+        got = []
+        self.bot.s.vk_connect = lambda text: got.append(text) or "ok"
+        self.bot.handle(msg("https://oauth.vk.ru/authorize?client_id=1&response_type=token"))
+        self.assertIn("открыть в браузере", self.api.texts()[-1])
+        self.bot.handle(msg("https://oauth.vk.ru/blank.html#access_token=vk1.X&expires_in=0&user_id=1"))
+        self.assertEqual(len(got), 1)
+
     def test_vk_help_without_app(self):
         self.cfg.vk_app_id = ""
         self.bot.handle(msg("/vk"))

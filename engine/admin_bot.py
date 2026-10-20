@@ -229,7 +229,7 @@ class AdminBot:
             self.on_file(msg)
             return
         text = (msg.get("text") or "").strip()
-        if "access_token=" in text and "oauth.vk.com" in text:
+        if "access_token=" in text and "oauth.vk." in text:
             # в сообщении ключ доступа — убираем его из переписки сразу
             self.api.delete_message(chat_id, msg.get("message_id"))
             if not self.s.vk_connect:
@@ -239,6 +239,11 @@ class AdminBot:
                 self.say(self.s.vk_connect(text))
             except Exception as e:  # noqa: BLE001
                 self.say(f"⚠️ VK не подключился: {e}")
+            return
+        if "oauth.vk." in text and "/authorize" in text:
+            self.say("Это ссылка для входа, её нужно открыть в браузере. После того как разрешишь доступ, "
+                     "VK покажет почти пустую страницу — пришли адрес именно этой страницы "
+                     "(в нём будет access_token=…).")
             return
         if text.startswith("/"):
             parts = text.split()
