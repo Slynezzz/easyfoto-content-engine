@@ -69,6 +69,16 @@ class Config:
     max_images_per_day: int = field(default_factory=lambda: _int("MAX_IMAGES_PER_DAY", 16))
     # Сколько роликов в день отдавать под праздники и инфоповоды, когда они есть
     occasions_per_day: int = field(default_factory=lambda: _int("OCCASIONS_PER_DAY", 1))
+    # --- генерация музыки (ElevenLabs Music или совместимый посредник)
+    music_api_key: str = field(default_factory=lambda: _env("MUSIC_API_KEY"))
+    music_api_base_url: str = field(default_factory=lambda: _env("MUSIC_API_BASE_URL", "https://api.elevenlabs.io").rstrip("/"))
+    music_model: str = field(default_factory=lambda: _env("MUSIC_MODEL", "music_v1"))
+    # Новых треков в сутки (остальные ролики берут уже созданные треки из фонотеки)
+    max_music_per_day: int = field(default_factory=lambda: _int("MAX_MUSIC_PER_DAY", 4))
+
+    # --- воронка: база Easyfotobot только для чтения (переходы по меткам utm, первые фото, покупки)
+    bot_database_url: str = field(default_factory=lambda: _env("BOT_DATABASE_URL"))
+
     persona_gender: str = field(default_factory=lambda: _env("PERSONA_GENDER", "male"))  # male | female
     bot_username: str = field(default_factory=lambda: _env("BOT_USERNAME", "Easyfotobot"))
 

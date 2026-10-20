@@ -55,12 +55,15 @@ TikTok, VK Клипы) для русскоязычной аудитории. П�
               "scenes": ["4–5 сцен для фото в этой теме"], "why": "почему сейчас"}}],
   "events": [{{"title": "инфоповод или мем по-русски", "date": "ГГГГ-ММ-ДД — когда это актуально",
               "scenes": ["3–5 сцен, где автор в образе на эту тему"], "why": "почему зайдёт"}}],
+  "music": ["стиль фоновой музыки, который сейчас в трендах Reels и Shorts: жанр, темп (bpm), инструменты, настроение — на английском, до 150 символов"],
   "summary": "2–3 предложения для владельца аккаунта: что изменилось в трендах"
 }}
 3–5 хуков, 3–6 заметок, 0–2 темы (только если есть явный актуальный повод),
 0–3 инфоповода на ближайшие 3 недели: события, вирусные мемы и тренды, к которым уместно
 сделать своё фото в тему. Без политики, трагедий, катастроф, войн, религиозных споров,
 брендов и знаменитостей; если подходящих нет — пустой список.
+2–4 музыкальных стиля: только описание звучания, без названий песен, имён артистов и
+брендов — по нему нейросеть создаст свою мелодию, похожую по настроению на тренд.
 Не повторяй хуки из списка уже существующих."""
 
 
@@ -128,7 +131,20 @@ def merge(pb: dict, res: dict, today: date, now: datetime) -> dict[str, list[str
     if notes:
         pb["trend_notes"] = notes
     added["events"] = merge_events(pb, res.get("events") or [], today)
+    styles = [_clean_music_style(x) for x in (res.get("music") or [])]
+    styles = [x for x in styles if x][:4]
+    if styles:
+        pb["music_styles"] = [{"style": x, "added_at": now.isoformat(timespec="seconds")} for x in styles]
+        added["music"] = styles
     return added
+
+
+def _clean_music_style(x) -> str:
+    """Стиль без кавычек (в них обычно названия песен) и не длиннее 150 символов."""
+    text = str(x or "").strip()
+    if not text or re.search(r"[«»\"“”]", text):
+        return ""
+    return text[:150]
 
 
 MAX_EVENTS = 10
@@ -316,6 +332,9 @@ def run(cfg: Config, db: DB, ai: AI, today: date | None = None, now: datetime | 
     if added.get("events"):
         parts.append("Инфоповоды в календарь (под них будут новые кадры):\n"
                      + "\n".join(f"  + {e}" for e in added["events"]))
+    if added.get("music"):
+        parts.append("Музыка в трендах (нейросеть создаст похожую по звучанию):\n"
+                     + "\n".join(f"  ♪ {m}" for m in added["music"]))
     if pb.get("trend_notes"):
         parts.append("Приёмы для сценариста:\n" + "\n".join(f"  — {n}" for n in pb["trend_notes"]))
     if removed:

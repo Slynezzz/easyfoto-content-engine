@@ -35,7 +35,8 @@ MOODS = {
 }
 MOOD_RU = {"festive": "праздничная", "romantic": "романтичная", "epic": "эпичная", "mystic": "мистика",
            "warm": "тёплая", "fun": "весёлая", "upbeat": "бодрая", "adventure": "путешествия",
-           "confident": "деловая", "folk": "народная", "calm": "спокойная"}
+           "confident": "деловая", "folk": "народная", "calm": "спокойная",
+           "trend": "трендовая (создана нейросетью)"}
 # если под настроение повода нет трека — какое настроение взять вместо
 FALLBACK = {"festive": "upbeat", "romantic": "warm", "epic": "upbeat", "mystic": "epic", "warm": "calm",
             "fun": "upbeat", "adventure": "upbeat", "confident": "calm", "folk": "festive", "calm": "warm"}
@@ -83,4 +84,4 @@ def summary(cfg: Config) -> str:
                 "с подписью «музыка» и настроением, например «музыка мистика».")
     lines = [f"• {MOOD_RU.get(m, m)}: {len(ts)}" for m, ts in sorted(lib.items())]
     return ("Треки по настроениям:\n" + "\n".join(lines)
-            + "\n\nНастроения: " + ", ".join(MOOD_RU.values()) + ".")
+            + "\n\nНастроения: " + ", ".join(v for k, v in MOOD_RU.items() if k != "trend") + ".")

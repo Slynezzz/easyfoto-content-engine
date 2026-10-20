@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import brief, images, music
+from . import brief, funnel, images, music, musicgen
+from . import playbook as pbm
 from .config import Config
 from .db import DB
 from .telegram import TelegramAPI, TelegramError
@@ -35,11 +36,14 @@ HELP = """Команды:
 /brief — что система знает о продукте и аудитории (можно заменить своим)
 /trends — обновить тренды прямо сейчас
 /stats — статистика роликов
+/funnel — сколько пришло в бот по ссылкам, сделали фото и купили (/funnel 7 — за неделю)
+/links — ссылки на бот с меткой для шапки каждой соцсети
 /analyze — пересчитать плейбук по статистике
 /pause и /resume — остановить или включить автопубликацию
 /scan — разобрать новые фото
 /photos — хранилище фото: посмотреть, удалить, перенести
 /music — какая музыка есть (добавить — прислать mp3 с подписью «музыка мистика»)
+/musictest — создать пробный трек нейросетью
 /move 5 до — перенести 5 последних фото в селфи «до» (или «реф», «библиотека»)
 
 Фото: просто пришли их сюда (лучше файлом, без сжатия).
@@ -286,6 +290,17 @@ class AdminBot:
             Path(path).unlink(missing_ok=True)
 
     # -------------------------------------------------------------- music
+    def _music_test(self) -> None:
+        import random
+        pb = pbm.load(self.cfg.playbook_path)
+        style, folder = musicgen.choose_style(pb, None, random.Random())
+        try:
+            path = musicgen.generate(self.cfg, self.db, style, folder, 15)
+        except musicgen.MusicError as e:
+            self.say(f"⚠️ Трек не получился: {e}")
+            return
+        self.api.send_audio(self.admin, path, f"✅ Музыка работает. Стиль: {style}\nТрек сохранён в фонотеку.")
+
     def on_music(self, msg: dict) -> None:
         f = msg.get("audio") or msg.get("document")
         name = (f.get("file_name") or "track.mp3").lower()
@@ -596,7 +611,19 @@ class AdminBot:
             brief.reset(self.cfg)
             self.say("Вернул стандартный бриф.")
         elif cmd == "/music":
-            self.say(music.summary(self.cfg))
+            self.say(music.summary(self.cfg) + "\n\n" + musicgen.status(self.cfg, self.db))
+        elif cmd == "/musictest":
+            if not musicgen.configured(self.cfg):
+                self.say(musicgen.status(self.cfg, self.db))
+            else:
+                self.say("Создаю трек в трендовом стиле, это до пары минут…")
+                self.run_bg(self._music_test)
+        elif cmd == "/funnel":
+            days = next((int(a) for a in args if a.isdigit()), 30)
+            self.say("Считаю переходы в бот…")
+            self.run_bg(lambda: self.say(funnel.report(self.cfg, days)))
+        elif cmd == "/links":
+            self.say(funnel.links_text(self.cfg))
         elif cmd == "/photos":
             self.photos_menu()
         elif cmd == "/move":

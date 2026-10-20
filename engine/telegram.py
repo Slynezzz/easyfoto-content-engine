@@ -70,6 +70,10 @@ class TelegramAPI:
         return self.call("sendPhoto", http_timeout=120, files=files, chat_id=chat_id,
                          caption=caption[:1024], reply_markup=reply_markup)
 
+    def send_audio(self, chat_id: int, path: str | Path, caption: str = "") -> dict:
+        files = {"audio": (Path(path).name, Path(path).read_bytes(), "audio/mpeg")}
+        return self.call("sendAudio", http_timeout=120, files=files, chat_id=chat_id, caption=caption[:1024])
+
     def send_media_group(self, chat_id: int, paths: list[str | Path], captions: list[str] | None = None) -> list:
         """До 10 фото одним альбомом."""
         files, media = {}, []

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import analyst, images, occasions, playbook as pbm, scout, server
+from . import analyst, funnel, images, occasions, playbook as pbm, scout, server
 from .admin_bot import AdminBot, Services, retry_keyboard
 from .config import Config
 from .db import DB
@@ -277,6 +277,8 @@ class Engine:
         if not self._once(f"analysis:{now:%G-W%V}"):
             return False
         self.say(analyst.run(self.cfg, self.db, self.ai))
+        if self.cfg.bot_database_url:
+            self.say(funnel.report(self.cfg, 7))
         if self.bot:
             self.bot.send_brief_proposals()
         return True

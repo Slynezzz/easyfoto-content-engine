@@ -595,7 +595,22 @@ class AI:
             imgs = rank_image_models(ids)
             host = base.split("://", 1)[-1]
             lines.append(f"{name} ({host}): модели картинок — " + (", ".join(imgs[:12]) or "не найдено"))
+            for label, models in media_models(ids).items():
+                lines.append(f"   {label}: " + (", ".join(models[:12]) or "нет"))
         return "\n".join(lines) or "Ключи для картинок не заданы"
+
+
+MEDIA_HINTS = {
+    "видео из фото (оживление)": re.compile(r"kling|veo|hailuo|runway|gen-?4|wan-?2|seedance|sora|luma|"
+                                            r"ray-?2|pika|vidu|pixverse|hunyuan-?video|video", re.I),
+    "музыка": re.compile(r"suno|udio|lyria|music|mubert|stable-audio", re.I),
+    "озвучка голосом": re.compile(r"tts|speech|voice|eleven", re.I),
+}
+
+
+def media_models(ids: list[str]) -> dict[str, list[str]]:
+    """Модели видео, музыки и голоса у посредника — для оживления фото и озвучки."""
+    return {label: [m for m in dict.fromkeys(ids) if rx.search(m)] for label, rx in MEDIA_HINTS.items()}
 
 
 IMAGE_HINT = re.compile(r"image|imagen|dall|flux|seedream|banana", re.I)
