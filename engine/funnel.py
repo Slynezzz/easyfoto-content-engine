@@ -46,6 +46,11 @@ def links_text(cfg: Config) -> str:
 def _connect(cfg: Config):
     if not cfg.bot_database_url:
         raise FunnelError("не подключена база бота: добавь в Railway BOT_DATABASE_URL")
+    url = cfg.bot_database_url
+    if "${{" in url or url.count("@") != 1 or not url.startswith(("postgres://", "postgresql://")):
+        raise FunnelError("адрес в BOT_DATABASE_URL составлен неверно. Нужен вид "
+                          "postgresql://engine_ro:ПАРОЛЬ@адрес.proxy.rlwy.net:ПОРТ/railway — "
+                          "без ${{...}} внутри и с одним знаком @")
     try:
         import psycopg2
     except ImportError as e:  # pragma: no cover — зависимость есть в requirements

@@ -132,6 +132,10 @@ class FunnelTests(unittest.TestCase):
         self.assertIn("VK clip p12: 5 → 1 → 0", text)
         conn.close.assert_called_once()
 
+    def test_broken_url_explained(self):
+        bad = "postgresql://engine_ro:p@postgresql://${{PGUSER}}:${{PGPASSWORD}}@${{RAILWAY_TCP_PROXY_DOMAIN}}/railway"
+        self.assertIn("составлен неверно", funnel.report(Config(bot_database_url=bad), 7))
+
     def test_report_without_db(self):
         self.assertIn("BOT_DATABASE_URL", funnel.report(Config(bot_database_url=""), 7))
         self.assertIn("https://t.me/Easyfotobot?start=utm_ig_bio", funnel.links_text(Config(bot_username="Easyfotobot")))
