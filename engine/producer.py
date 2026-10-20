@@ -6,7 +6,7 @@ import dataclasses
 import logging
 import random
 import secrets
-from datetime import date
+from datetime import date, datetime
 
 from . import brief, images, music, planner
 from . import occasions as occ_mod
@@ -26,6 +26,26 @@ class ProduceError(RuntimeError):
     pass
 
 
+def timing_hint(day, publish) -> str:
+    """Как говорить о дате повода в день публикации: заранее, сегодня или уже после."""
+    if isinstance(publish, str):
+        try:
+            publish = date.fromisoformat(publish[:10])
+        except ValueError:
+            return ""
+    if isinstance(publish, datetime):
+        publish = publish.date()
+    left = (day - publish).days
+    if left > 1:
+        return (f"Ролик выйдет {publish:%d.%m}, до повода {left} дн. Пиши как о предстоящем "
+                "(«скоро», «успей подготовить фото заранее»), НЕ «уже сегодня».")
+    if left == 1:
+        return "Ролик выйдет накануне повода: «уже завтра», «успеешь сделать фото к празднику»."
+    if left == 0:
+        return "Ролик выйдет в день повода: можно «уже сегодня»."
+    return f"Повод был {-left} дн. назад: подавай как «если не успел — ещё не поздно», без «сегодня»."
+
+
 def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
             rng: random.Random | None = None, scheduled_for: str | None = None,
             occasion: occ_mod.Occasion | None = None) -> int:
@@ -43,7 +63,7 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
         pb["themes"][occasion.theme_id] = {
             "weight": 0, "title": occasion.title, "scenes": occasion.scenes,
             "occasion": f"{occasion.title}, {occasion.day:%d.%m}", "note": occasion.note,
-            "profession": occasion.profession,
+            "profession": occasion.profession, "timing": timing_hint(occasion.day, scheduled_for or today),
         }
         choice = dataclasses.replace(choice, theme=occasion.theme_id,
                                      occasion=f"{occasion.title} ({occasion.day:%d.%m})")

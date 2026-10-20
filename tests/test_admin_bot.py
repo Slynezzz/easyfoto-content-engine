@@ -261,5 +261,16 @@ class AdminBotTests(unittest.TestCase):
         self.assertFalse(brief.is_custom(self.cfg))
 
 
+    def test_long_caption_is_sent_in_full(self):
+        long = "Очень длинный текст поста. " * 60 + "по ссылке в профиле"
+        pid = self.db.create_post(status="rendered", format="worlds", hook_id="h", theme="t",
+                                  script_json={"script": {"hook": "Хук"}, "post_caption": long, "choice": {}},
+                                  video_path="v.mp4", cover_path="c.jpg", caption=long)
+        self.assertTrue(self.bot.send_for_approval(pid))
+        video = [k for m, k in self.api.sent if m == "video"][-1]
+        self.assertLessEqual(len(video["caption"]), 1024)
+        self.assertTrue(self.api.texts()[-1].endswith("по ссылке в профиле"))
+
+
 if __name__ == "__main__":
     unittest.main()

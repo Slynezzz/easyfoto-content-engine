@@ -120,6 +120,8 @@ def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None
         if theme.get("profession"):
             lines.append("Подача «я в профессии»: автор примеряет образ представителя профессии и "
                          "поздравляет тех, кто в ней работает; предложи им сделать такое же фото.")
+        if theme.get("timing"):
+            lines.append(f"Время: {theme['timing']}")
         if theme.get("note"):
             lines.append(f"Важно: {theme['note']}")
     elif choice.occasion:

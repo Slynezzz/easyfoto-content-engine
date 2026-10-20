@@ -204,3 +204,14 @@ class ProducerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TimingHintTests(unittest.TestCase):
+    def test_says_upcoming_not_today(self):
+        from datetime import date
+        from engine.producer import timing_hint
+        self.assertIn("НЕ «уже сегодня»", timing_hint(date(2026, 10, 31), date(2026, 10, 20)))
+        self.assertIn("до повода 11", timing_hint(date(2026, 10, 31), "2026-10-20T16:00:00+00:00"))
+        self.assertIn("завтра", timing_hint(date(2026, 10, 31), date(2026, 10, 30)))
+        self.assertIn("уже сегодня", timing_hint(date(2026, 10, 31), date(2026, 10, 31)))
+        self.assertIn("назад", timing_hint(date(2026, 10, 31), date(2026, 11, 2)))

@@ -153,8 +153,13 @@ class AdminBot:
         if plan.get("llm_ok") is False:
             warn = (f"⚠️ Нейросеть не ответила, тексты по запасному шаблону.\n"
                     f"Причина: {(plan.get('llm_error') or 'неизвестна')[:200]}\n\n")
-        caption = (f"{warn}#{post_id} · {tags}{when}\n\n"
-                   f"Хук: {plan['script']['hook'].replace('*', '')}\n\n{plan['post_caption'][:600]}")
+        head = f"{warn}#{post_id} · {tags}{when}\n\nХук: {plan['script']['hook'].replace('*', '')}"
+        text = post["caption"] or plan["post_caption"]
+        caption = f"{head}\n\n{text}"
+        # подпись к видео в Telegram — до 1024 символов; длинный текст поста шлём следом целиком
+        follow = None
+        if len(caption) > 1024:
+            caption, follow = head[:1024], f"Текст поста #{post_id}:\n\n{text}"[:4096]
         try:
             msg = self.api.send_video(self.admin, post["video_path"], caption,
                                       approval_keyboard(post_id), cover=post["cover_path"])
@@ -163,6 +168,11 @@ class AdminBot:
             self.db.update_post(post_id, status="rendered")
             return False
         self.db.update_post(post_id, status="pending", approval_message_id=msg["message_id"])
+        if follow:
+            try:
+                self.api.send_message(self.admin, follow)
+            except Exception as e:  # noqa: BLE001 — ролик уже на одобрении, текст не критичен
+                log.warning("full caption #%s: %s", post_id, e)
         return True
 
     def push_rendered(self) -> int:
