@@ -327,7 +327,12 @@ class AI:
             text = rank_text_models(provider, ids)
             lines.append(f"{name} — сейчас используется: {self.models[provider]}\n"
                          f"Текстовые модели посредника ({len(text)}): " + (", ".join(text[:25]) or "не найдено")
-                         + (f"\nВсего моделей: {len(ids)}" if len(ids) != len(text) else ""))
+                         + (f"\nВсего моделей: {len(ids)}" if len(ids) != len(text) else "")
+                         + "".join(f"\n{label}: " + (", ".join(ms[:12]) or "нет")
+                                   for label, ms in media_models(ids).items()))
+            other = [m for m in ids if m not in text and not any(m in ms for ms in media_models(ids).values())]
+            if other:
+                lines[-1] += "\nОстальные: " + ", ".join(other[:40])
         return "\n\n".join(lines)
 
     @staticmethod
