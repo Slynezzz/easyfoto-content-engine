@@ -136,6 +136,13 @@ class FunnelTests(unittest.TestCase):
         bad = "postgresql://engine_ro:p@postgresql://${{PGUSER}}:${{PGPASSWORD}}@${{RAILWAY_TCP_PROXY_DOMAIN}}/railway"
         self.assertIn("составлен неверно", funnel.report(Config(bot_database_url=bad), 7))
 
+    def test_describe_hides_password_and_flags_bad_chars(self):
+        d = funnel.describe("postgresql://engine_ro:Ab12cd34ef@h.proxy.rlwy.net:35895/railway")
+        self.assertIn("engine_ro", d)
+        self.assertIn("10 символов", d)
+        self.assertNotIn("Ab12cd34ef", d)
+        self.assertIn("ломают адрес", funnel.describe("postgresql://engine_ro:Ab12%23cd!x@h:1/railway"))
+
     def test_report_without_db(self):
         self.assertIn("BOT_DATABASE_URL", funnel.report(Config(bot_database_url=""), 7))
         self.assertIn("https://t.me/Easyfotobot?start=utm_ig_bio", funnel.links_text(Config(bot_username="Easyfotobot")))

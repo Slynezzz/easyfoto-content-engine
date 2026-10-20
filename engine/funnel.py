@@ -51,7 +51,7 @@ def links_text(cfg: Config) -> str:
 def _connect(cfg: Config):
     if not cfg.bot_database_url:
         raise FunnelError("не подключена база бота: добавь в Railway BOT_DATABASE_URL")
-    url = cfg.bot_database_url
+    url = cfg.bot_database_url.strip().strip("'\"").strip()
     if "${{" in url or url.count("@") != 1 or not url.startswith(("postgres://", "postgresql://")):
         raise FunnelError("адрес в BOT_DATABASE_URL составлен неверно. Нужен вид "
                           "postgresql://engine_ro:ПАРОЛЬ@адрес.proxy.rlwy.net:ПОРТ/railway — "
@@ -61,12 +61,33 @@ def _connect(cfg: Config):
     except ImportError as e:  # pragma: no cover — зависимость есть в requirements
         raise FunnelError("нет драйвера PostgreSQL (psycopg2)") from e
     try:
-        conn = psycopg2.connect(cfg.bot_database_url, connect_timeout=15,
+        conn = psycopg2.connect(url, connect_timeout=15,
                                 options="-c default_transaction_read_only=on -c statement_timeout=20000")
     except psycopg2.Error as e:
-        raise FunnelError(f"база бота недоступна: {str(e).splitlines()[0][:200]}") from None
+        raise FunnelError(f"база бота недоступна: {str(e).splitlines()[0][:200]}\n\n{describe(url)}") from None
     conn.set_session(readonly=True, autocommit=True)
     return conn
+
+
+def describe(url: str) -> str:
+    """Что движок видит в BOT_DATABASE_URL — без самого пароля, чтобы сверить с базой."""
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit(url)
+        pw = u.password or ""
+        user, host, port, db = u.username, u.hostname, u.port, (u.path or "/").lstrip("/")
+    except ValueError:
+        return "Адрес не разбирается — проверь формат."
+    bad = sorted({ch for ch in pw if not ch.isalnum()})
+    lines = ["Что сейчас в BOT_DATABASE_URL:",
+             f"• пользователь: {user}", f"• адрес: {host}:{port}", f"• база: {db}",
+             f"• пароль: {len(pw)} символов, начинается на «{pw[:2]}…», заканчивается на «…{pw[-2:]}»"
+             if len(pw) >= 6 else f"• пароль: {len(pw)} символов"]
+    if bad:
+        lines.append(f"⚠️ в пароле есть символы {' '.join(bad)} — они ломают адрес; задай пароль только из букв и цифр")
+    if pw != pw.strip():
+        lines.append("⚠️ в пароле пробелы по краям")
+    return "\n".join(lines)
 
 
 BY_SOURCE = """
