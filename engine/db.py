@@ -64,6 +64,15 @@ CREATE TABLE IF NOT EXISTS playbook_history (
     note TEXT
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- публикации ролика на других площадках (VK и т.д.), независимо от Instagram
+CREATE TABLE IF NOT EXISTS crossposts (
+    post_id INTEGER NOT NULL REFERENCES posts(id),
+    platform TEXT NOT NULL,
+    status TEXT NOT NULL,            -- queued | publishing | published | failed
+    due_at TEXT NOT NULL,            -- UTC ISO: когда публиковать
+    external_id TEXT, url TEXT, error TEXT, updated_at TEXT,
+    PRIMARY KEY (post_id, platform)
+);
 """
 
 
@@ -181,6 +190,39 @@ class DB:
             return cur.rowcount == 1
 
     # ------------------------------------------------------------ metrics
+    # ------------------------------------------------------------ crossposts
+    def queue_crosspost(self, post_id: int, platform: str, due_at: str) -> bool:
+        """Ставит публикацию в очередь; повторное одобрение не создаёт дубль."""
+        with self.tx() as c:
+            cur = c.execute("INSERT OR IGNORE INTO crossposts(post_id, platform, status, due_at, updated_at) "
+                            "VALUES (?,?,?,?,?)", (post_id, platform, "queued", due_at, now_iso()))
+            return cur.rowcount == 1
+
+    def crossposts(self, status: str | None = None, platform: str | None = None) -> list[sqlite3.Row]:
+        sql, args = "SELECT * FROM crossposts WHERE 1=1", []
+        if status:
+            sql += " AND status=?"
+            args.append(status)
+        if platform:
+            sql += " AND platform=?"
+            args.append(platform)
+        return self.q(sql + " ORDER BY due_at", tuple(args))
+
+    def crosspost(self, post_id: int, platform: str) -> sqlite3.Row | None:
+        return self.one("SELECT * FROM crossposts WHERE post_id=? AND platform=?", (post_id, platform))
+
+    def claim_crosspost(self, post_id: int, platform: str, from_status: str, to_status: str) -> bool:
+        with self.tx() as c:
+            cur = c.execute("UPDATE crossposts SET status=?, updated_at=? WHERE post_id=? AND platform=? AND status=?",
+                            (to_status, now_iso(), post_id, platform, from_status))
+            return cur.rowcount == 1
+
+    def update_crosspost(self, post_id: int, platform: str, **fields: Any) -> None:
+        fields["updated_at"] = now_iso()
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self.x(f"UPDATE crossposts SET {cols} WHERE post_id=? AND platform=?",
+               (*fields.values(), post_id, platform))
+
     def add_metrics(self, post_id: int, m: dict[str, int | None]) -> None:
         self.x(
             "INSERT OR REPLACE INTO metrics(post_id, collected_at, plays, reach, likes, comments, saves, "

@@ -202,8 +202,13 @@ class AI:
 
     # ------------------------------------------------------------- текст
     def json(self, system: str, prompt: str, images: list[str | Path] | None = None,
-             temperature: float = 0.9) -> dict | list:
-        """Текстовый запрос с ответом в JSON. Gemini, при сбое — OpenAI."""
+             temperature: float = 0.9, model: str | None = None) -> dict | list:
+        """Текстовый запрос с ответом в JSON. Gemini, при сбое — OpenAI.
+
+        model — конкретная модель у Gemini-посредника (например, Claude для текстов роликов):
+        без автозамены и без запасных путей, ошибку решает вызывающий код."""
+        if model:
+            return self._model_json(model, system, prompt, images or [], temperature)
         errors = []
         if self.cfg.gemini_api_key:
             try:
@@ -277,6 +282,17 @@ class AI:
             return self._gemini_json_model(model, system, prompt, images, temperature)
         text = "".join(p.get("text", "") for p in _gemini_parts(data))
         return parse_json(text)
+
+    def _model_json(self, model, system, prompt, images, temperature):
+        if not self.cfg.gemini_api_key:
+            raise AIError("для отдельной модели текстов нужен GEMINI_API_KEY посредника")
+        if model.lower().startswith("gemini"):
+            return self._gemini_json_model(model, system, prompt, images, temperature)
+        if self._is_google:
+            raise AIError(f"Google не отдаёт модель {model}")
+        # не-Gemini модели посредники отдают только в формате OpenAI
+        return self._chat_json(f"{self._gemini_root}/v1/chat/completions", self.cfg.gemini_api_key,
+                               model, system, prompt, images, temperature)
 
     def _openai_json(self, system, prompt, images, temperature):
         return self._with_model("openai", lambda m: self._chat_json(

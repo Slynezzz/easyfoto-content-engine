@@ -60,6 +60,7 @@ class Plan:
     hashtags: list[str] = field(default_factory=list)
     llm_ok: bool = True
     llm_error: str = ""
+    copy_error: str = ""              # почему сильная модель текстов не справилась (тогда писала основная)
 
     def to_script(self) -> Script:
         return Script(**self.script)
@@ -187,14 +188,24 @@ def fallback(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None, bo
 
 def plan(ai: AI, pb: dict, choice: Choice, n: int, *, photo_notes: list[str] | None = None,
          generate_scenes: bool = False, gender: str = "male", bot: str = "Easyfotobot",
-         brief_text: str = "") -> Plan:
+         brief_text: str = "", copy_model: str = "") -> Plan:
     system = SYSTEM.format(bot=bot, brief=brief_text or "(бриф не задан)",
                            rules="\n".join(f"- {r}" for r in pb.get("rules", [])))
     prompt = build_prompt(pb, choice, n, photo_notes, generate_scenes, gender)
     last_err: Exception | None = None
+    copy_error = ""
+    if copy_model:
+        # тексты пишет сильная модель; если не справилась — основная, как раньше
+        try:
+            return validate(ai.json(system, prompt, model=copy_model), choice, pb, n, generate_scenes)
+        except (AIError, ValueError, TypeError, KeyError) as e:
+            copy_error = f"{copy_model}: {str(e)[:200]}"
+            log.warning("copy model failed: %s", copy_error)
     for _ in range(2):
         try:
-            return validate(ai.json(system, prompt), choice, pb, n, generate_scenes)
+            res = validate(ai.json(system, prompt), choice, pb, n, generate_scenes)
+            res.copy_error = copy_error
+            return res
         except (AIError, ValueError, TypeError, KeyError) as e:
             last_err = e
             log.warning("planner retry: %s", e)
@@ -204,4 +215,5 @@ def plan(ai: AI, pb: dict, choice: Choice, n: int, *, photo_notes: list[str] | N
     log.error("planner fallback: %s", last_err)
     fb = fallback(pb, choice, n, photo_notes, bot)
     fb.llm_error = str(last_err)[:300]
+    fb.copy_error = copy_error
     return fb

@@ -92,12 +92,14 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
         choice = dataclasses.replace(choice, theme=theme)
         notes = [f"{r['title'] or 'образ без описания'} — {r['description'] or ''}".strip(" —") for r in rows]
         return rows, planner.plan(ai, pb, choice, len(rows), photo_notes=notes,
-                                  gender=cfg.persona_gender, bot=cfg.bot_username, brief_text=brief_text)
+                                  gender=cfg.persona_gender, bot=cfg.bot_username, brief_text=brief_text,
+                                  copy_model=cfg.copy_model)
 
     def from_generation():
         k = max(MIN_PHOTOS, min(n, cfg.generate_photos))
         gplan = planner.plan(ai, pb, choice, k, generate_scenes=True,
-                             gender=cfg.persona_gender, bot=cfg.bot_username, brief_text=brief_text)
+                             gender=cfg.persona_gender, bot=cfg.bot_username, brief_text=brief_text,
+                                  copy_model=cfg.copy_model)
         ids, errors = [], []
         for scene in gplan.scenes:
             try:
@@ -152,6 +154,7 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
         spec.music = track
 
     db.set("last_ai_error", "" if plan.llm_ok else plan.llm_error or "нейросеть не ответила")
+    db.set("last_copy_error", plan.copy_error)
     token = secrets.token_urlsafe(18)
     video = cfg.media_dir / f"{token}.mp4"
     cover = cfg.media_dir / f"{token}.jpg"

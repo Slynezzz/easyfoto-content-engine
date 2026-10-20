@@ -93,6 +93,12 @@ class TelegramAPI:
         except TelegramError as e:  # «message is not modified» и т.п. — не критично
             log.debug("edit_markup: %s", e)
 
+    def delete_message(self, chat_id: int, message_id: int) -> None:
+        try:
+            self.call("deleteMessage", chat_id=chat_id, message_id=message_id)
+        except TelegramError as e:
+            log.debug("delete_message: %s", e)
+
     def answer_callback(self, callback_id: str, text: str = "") -> None:
         try:
             self.call("answerCallbackQuery", callback_query_id=callback_id, text=text[:200])

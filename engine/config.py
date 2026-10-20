@@ -39,6 +39,8 @@ class Config:
     gemini_api_style: str = field(default_factory=lambda: _env("GEMINI_API_STYLE", "auto"))
     gemini_text_model: str = field(default_factory=lambda: _env("GEMINI_TEXT_MODEL", "gemini-2.5-flash"))
     gemini_image_model: str = field(default_factory=lambda: _env("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"))
+    # Модель, которая пишет хуки и тексты роликов (сильнее — убедительнее). Пусто — та же, что для служебных задач.
+    copy_model: str = field(default_factory=lambda: _env("COPY_MODEL", "claude-sonnet-5-5"))
     openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY"))
     openai_text_model: str = field(default_factory=lambda: _env("OPENAI_TEXT_MODEL", "gpt-4.1-mini"))
     openai_image_model: str = field(default_factory=lambda: _env("OPENAI_IMAGE_MODEL", "gpt-image-1.5"))
@@ -75,6 +77,18 @@ class Config:
     music_model: str = field(default_factory=lambda: _env("MUSIC_MODEL", "music_v1"))
     # Новых треков в сутки (остальные ролики берут уже созданные треки из фонотеки)
     max_music_per_day: int = field(default_factory=lambda: _int("MAX_MUSIC_PER_DAY", 4))
+
+    # --- VK Клипы: сообщество, куда публикуются ролики, и id приложения VK для входа
+    vk_group_id: int = field(default_factory=lambda: _int("VK_GROUP_ID", 0))
+    vk_app_id: str = field(default_factory=lambda: _env("VK_APP_ID"))
+    vk_access_token: str = field(default_factory=lambda: _env("VK_ACCESS_TOKEN"))  # можно не задавать: вход через /vk
+    vk_wallpost: bool = field(default_factory=lambda: _env("VK_WALLPOST", "1") not in ("0", "false", "no"))
+    # куда ведёт ссылка в VK: max (бот в MAX) или tg (бот в Telegram)
+    vk_link_target: str = field(default_factory=lambda: _env("VK_LINK_TARGET", "max"))
+    max_bot_url: str = field(default_factory=lambda: _env("MAX_BOT_URL", "https://max.ru/id230406400050_bot").rstrip("/"))
+
+    # --- предупреждения о балансах: порог в долларах для посредников
+    balance_warn_usd: float = field(default_factory=lambda: _float("BALANCE_WARN_USD", 3.0))
 
     # --- воронка: база Easyfotobot только для чтения (переходы по меткам utm, первые фото, покупки)
     bot_database_url: str = field(default_factory=lambda: _env("BOT_DATABASE_URL"))

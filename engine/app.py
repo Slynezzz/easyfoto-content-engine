@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import analyst, funnel, images, occasions, playbook as pbm, scout, server
+from . import analyst, balances, funnel, images, occasions, playbook as pbm, scout, server
 from .admin_bot import AdminBot, Services, retry_keyboard
 from .config import Config
 from .db import DB
@@ -24,6 +24,7 @@ from .instagram import IGError, Instagram
 from .llm import AI
 from .producer import produce
 from .telegram import TelegramAPI
+from .vk import VK, VKError
 
 log = logging.getLogger("engine")
 
@@ -36,6 +37,7 @@ class Engine:
                  bot: AdminBot | None = None, now: Callable[[], datetime] | None = None,
                  rng: random.Random | None = None):
         self.cfg, self.db, self.ai, self.ig, self.bot = cfg, db, ai, ig, bot
+        self.vk = VK(cfg, db)
         self.tz = ZoneInfo(cfg.timezone)
         self._now = now or (lambda: datetime.now(self.tz))
         self.rng = rng or random.Random()
@@ -134,6 +136,72 @@ class Engine:
             return ""
         return f"🚀 Ролик #{post_id} опубликован: {link}"
 
+    # ------------------------------------------------------- другие площадки
+    def on_approved(self, post_id: int, now: bool) -> str:
+        """Ставит одобренный ролик в очередь VK (и будущих площадок). Возвращает строку для владельца."""
+        if not self.vk.ready():
+            return ""
+        post = self.db.post(post_id)
+        if now:
+            when = self.now()
+        elif post["scheduled_for"]:
+            when = datetime.strptime(post["scheduled_for"], SLOT_FMT).replace(tzinfo=self.tz)
+        else:
+            when = self.next_free_slot()
+            self.db.update_post(post_id, scheduled_for=when.strftime(SLOT_FMT))
+        due = when.astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+        if not self.db.queue_crosspost(post_id, "vk", due):
+            return ""
+        return "📘 VK: сейчас" if now or when <= self.now() else f"📘 VK: {when:%d.%m %H:%M}"
+
+    def vk_retry(self, post_id: int) -> str:
+        due = self.now().astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+        if not self.db.claim_crosspost(post_id, "vk", "failed", "queued"):
+            return "Этот ролик уже не ждёт повтора в VK."
+        self.db.update_crosspost(post_id, "vk", due_at=due)
+        return f"Повторю публикацию #{post_id} в VK в ближайшую минуту."
+
+    def job_crosspost(self) -> int:
+        """Публикует в VK ролики, чьё время наступило. Не больше одного за раз."""
+        if self.db.get("paused") == "1" or not self.vk.ready():
+            return 0
+        now = self.now().astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+        due = [r for r in self.db.crossposts("queued", "vk") if r["due_at"] <= now]
+        if not due:
+            return 0
+        pid = due[0]["post_id"]
+        if not self.db.claim_crosspost(pid, "vk", "queued", "publishing"):
+            return 0
+        try:
+            url = self.vk.publish(pid)
+        except Exception as e:  # noqa: BLE001 — любая ошибка не должна оставить пост «в публикации»
+            msg = str(e) if isinstance(e, VKError) else f"{type(e).__name__}: {e}"
+            self.db.update_crosspost(pid, "vk", status="failed", error=msg[:500])
+            self.say(f"⚠️ VK: ролик #{pid} не опубликован: {msg}",
+                     {"inline_keyboard": [[{"text": "🔁 Повторить в VK", "callback_data": f"vkretry:{pid}"}]]})
+            return 0
+        self.db.update_crosspost(pid, "vk", status="published")
+        self.say(f"📘 VK: ролик #{pid} опубликован: {url}")
+        return 1
+
+    def job_vk_token(self) -> bool:
+        warn = self.vk.token_warning()
+        if warn and self.db.get("vk_warned") != warn[:20]:
+            self.db.set("vk_warned", warn[:20])
+            self.say(warn)
+        return bool(warn)
+
+    def job_balances(self) -> bool:
+        """Раз в сутки: предупреждения о балансах и лимитах (молчит, если всё в порядке)."""
+        warns = balances.warnings(self.cfg, self.db)
+        prev = set(filter(None, (self.db.get("balance_warned") or "").split("\n")))
+        fresh = [w for w in warns if w not in prev]   # одно и то же не повторяем каждый день
+        self.db.set("balance_warned", "\n".join(warns))
+        if fresh:
+            self.say("💳 Пора пополнить или проверить:\n" + "\n".join(f"• {w}" for w in fresh)
+                     + "\n\nПодробно — /balance")
+        return bool(fresh)
+
     def recover(self) -> int:
         """После перезапуска: возвращает «зависшие» посты в рабочие статусы."""
         n = 0
@@ -148,6 +216,14 @@ class Engine:
             n += 1
         for p in self.db.posts("sending"):
             self.db.update_post(p["id"], status="rendered")
+            n += 1
+        for r in self.db.crossposts("publishing"):
+            # если видео уже загружено (external_id есть), повтор только допишет пост на стене
+            self.db.update_crosspost(r["post_id"], r["platform"], status="failed",
+                                     error="сервис перезапустился во время публикации")
+            self.say(f"⚠️ VK: ролик #{r['post_id']} публиковался в момент перезапуска. Нажми «Повторить» — "
+                     "видео второй раз не загрузится.",
+                     {"inline_keyboard": [[{"text": "🔁 Повторить в VK", "callback_data": f"vkretry:{r['post_id']}"}]]})
             n += 1
         return n
 
@@ -291,7 +367,8 @@ class Engine:
         cutoff = (self.now() - timedelta(days=keep_days)).astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
         rows = self.db.q(
             "SELECT id, video_path, cover_path FROM posts WHERE video_path IS NOT NULL AND ("
-            "(status='rejected') OR (status IN ('published','manual') AND COALESCE(published_at, created_at) < ?))",
+            "(status='rejected') OR (status IN ('published','manual') AND COALESCE(published_at, created_at) < ?)) "
+            "AND id NOT IN (SELECT post_id FROM crossposts WHERE status IN ('queued','publishing','failed'))",
             (cutoff,))
         n = 0
         for r in rows:
@@ -320,6 +397,9 @@ class Engine:
             ("plan", timedelta(minutes=10), self.job_plan),
             ("push", timedelta(minutes=5), self.job_push),
             ("publish", timedelta(seconds=30), self.job_publish),
+            ("crosspost", timedelta(minutes=1), self.job_crosspost),
+            ("vk_token", timedelta(hours=6), self.job_vk_token),
+            ("balances", timedelta(hours=24), self.job_balances),
             ("metrics", timedelta(hours=6), self.job_metrics),
             ("scout", timedelta(hours=1), self.job_scout),
             ("analysis", timedelta(hours=1), self.job_analysis),
@@ -365,6 +445,11 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
             make_for=engine.make_for,
             occasions_text=engine.occasions_text,
             scout_trends=lambda: scout.run(cfg, db, ai),
+            on_approved=engine.on_approved,
+            vk_connect=engine.vk.save_token,
+            vk_retry=engine.vk_retry,
+            vk_status=engine.vk.status,
+            balances_text=lambda: balances.report(cfg, db),
         ))
         engine.bot = bot
     engine.recover()

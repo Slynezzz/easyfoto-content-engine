@@ -38,6 +38,9 @@ class FakeAPI:
     def edit_markup(self, chat_id, message_id, reply_markup):
         self.sent.append(("markup", {"label": reply_markup["inline_keyboard"][0][0]["text"]}))
 
+    def delete_message(self, chat_id, message_id):
+        self.sent.append(("delete", {"message_id": message_id}))
+
     def answer_callback(self, cid, text=""):
         self.sent.append(("answer", {"text": text}))
 
@@ -270,6 +273,29 @@ class AdminBotTests(unittest.TestCase):
         video = [k for m, k in self.api.sent if m == "video"][-1]
         self.assertLessEqual(len(video["caption"]), 1024)
         self.assertTrue(self.api.texts()[-1].endswith("по ссылке в профиле"))
+
+
+    def test_vk_token_message_is_deleted_and_saved(self):
+        got = []
+        self.bot.s.vk_connect = lambda text: got.append(text) or "✅ VK подключён"
+        self.bot.handle(msg("https://oauth.vk.com/blank.html#access_token=vk1.SECRET&expires_in=0&user_id=1"))
+        self.assertIn(("delete", {"message_id": 1}), self.api.sent)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(self.api.texts()[-1], "✅ VK подключён")
+
+    def test_vk_help_without_app(self):
+        self.cfg.vk_app_id = ""
+        self.bot.handle(msg("/vk"))
+        self.assertIn("VK_APP_ID", self.api.texts()[-1])
+        self.cfg.vk_app_id = "55"
+        self.bot.handle(msg("/vk"))
+        self.assertIn("client_id=55", self.api.texts()[-1])
+
+    def test_approval_queues_other_platforms(self):
+        pid = self._post()
+        self.bot.s.on_approved = lambda p, now: f"📘 VK: {'сейчас' if now else 'по расписанию'}"
+        self.bot.handle(cb(f"ok:{pid}"))
+        self.assertIn("📘 VK: по расписанию", self.api.texts())
 
 
 if __name__ == "__main__":

@@ -32,15 +32,20 @@ def start_param(source: str, medium: str = "bio", campaign: str = "") -> str:
     return param[:64]
 
 
-def link(cfg: Config, source: str, medium: str = "bio", campaign: str = "") -> str:
-    return f"https://t.me/{cfg.bot_username.lstrip('@')}?start={start_param(source, medium, campaign)}"
+def link(cfg: Config, source: str, medium: str = "bio", campaign: str = "", target: str = "tg") -> str:
+    """Ссылка на бот с меткой: target=tg — Telegram, max — бот в MAX (метку понимают оба)."""
+    param = start_param(source, medium, campaign)
+    if target == "max":
+        return f"{cfg.max_bot_url}?start={param}"
+    return f"https://t.me/{cfg.bot_username.lstrip('@')}?start={param}"
 
 
 def links_text(cfg: Config) -> str:
     rows = [f"• {name}: {link(cfg, key)}" for key, name in SOURCES.items()]
     return ("Ссылки на бот с меткой площадки — поставь каждую в шапку своего профиля. "
             "Тогда /funnel покажет, сколько людей пришло с каждой площадки, сколько сделали фото и купили.\n\n"
-            + "\n".join(rows))
+            "Telegram-бот:\n" + "\n".join(rows)
+            + f"\n\nБот в MAX (для VK — у аудитории VK он под рукой):\n• VK: {link(cfg, 'vk', target='max')}")
 
 
 def _connect(cfg: Config):

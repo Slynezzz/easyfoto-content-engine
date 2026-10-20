@@ -36,6 +36,8 @@ HELP = """Команды:
 /brief — что система знает о продукте и аудитории (можно заменить своим)
 /trends — обновить тренды прямо сейчас
 /stats — статистика роликов
+/vk — подключить VK Клипы (ролики будут выходить и в сообщество VK)
+/balance — балансы и лимиты всех платных сервисов
 /funnel — сколько пришло в бот по ссылкам, сделали фото и купили (/funnel 7 — за неделю)
 /links — ссылки на бот с меткой для шапки каждой соцсети
 /analyze — пересчитать плейбук по статистике
@@ -68,6 +70,11 @@ class Services:
     test_image: Callable[[], tuple] | None = None   # -> (путь к кадру, путь генерации, секунды)
     make_for: Callable[[str], int] | None = None     # ролик к поводу по названию
     occasions_text: Callable[[], str] = lambda: "Календарь поводов недоступен"
+    on_approved: Callable[[int, bool], str] | None = None   # поставить публикации на других площадках
+    vk_connect: Callable[[str], str] | None = None          # сохранить вход в VK из адреса страницы
+    vk_retry: Callable[[int], str] | None = None
+    balances_text: Callable[[], str] = lambda: "Проверка балансов недоступна"
+    vk_status: Callable[[], str] = lambda: "VK: не подключён"
 
 
 def approval_keyboard(post_id: int) -> dict:
@@ -222,6 +229,17 @@ class AdminBot:
             self.on_file(msg)
             return
         text = (msg.get("text") or "").strip()
+        if "access_token=" in text and "oauth.vk.com" in text:
+            # в сообщении ключ доступа — убираем его из переписки сразу
+            self.api.delete_message(chat_id, msg.get("message_id"))
+            if not self.s.vk_connect:
+                self.say("Подключение VK недоступно.")
+                return
+            try:
+                self.say(self.s.vk_connect(text))
+            except Exception as e:  # noqa: BLE001
+                self.say(f"⚠️ VK не подключился: {e}")
+            return
         if text.startswith("/"):
             parts = text.split()
             self.on_command(parts[0].split("@")[0].lower(), parts[1:])
@@ -618,6 +636,11 @@ class AdminBot:
             else:
                 self.say("Создаю трек в трендовом стиле, это до пары минут…")
                 self.run_bg(self._music_test)
+        elif cmd == "/vk":
+            self.say(self.vk_help())
+        elif cmd == "/balance":
+            self.say("Проверяю балансы сервисов…")
+            self.run_bg(lambda: self.say(self.s.balances_text()))
         elif cmd == "/funnel":
             days = next((int(a) for a in args if a.isdigit()), 30)
             self.say("Считаю переходы в бот…")
@@ -634,6 +657,21 @@ class AdminBot:
         else:
             self.say("Не знаю такой команды.\n\n" + HELP)
 
+    def vk_help(self) -> str:
+        from . import vk
+        if not self.cfg.vk_app_id:
+            return ("Чтобы ролики выходили в VK Клипы:\n"
+                    "1. Открой dev.vk.com → «Мои приложения» → «Создать», тип «Standalone-приложение» "
+                    "(или «Веб» в кабинете VK ID, если старого раздела нет). Скопируй ID приложения.\n"
+                    "2. В Railway добавь VK_APP_ID = этот ID и VK_GROUP_ID = номер сообщества "
+                    "(цифры из адреса club123456 или из «Управление → Адрес»).\n"
+                    "3. После деплоя снова набери /vk — пришлю ссылку для входа.")
+        return ("Вход в VK:\n"
+                f"1. Открой ссылку и разреши доступ (видео, стена, сообщества): {vk.auth_url(self.cfg)}\n"
+                "2. VK откроет почти пустую страницу. Скопируй адрес из адресной строки целиком "
+                "(начинается с https://oauth.vk.com/blank.html#access_token=) и пришли сюда.\n"
+                "Сообщение с ключом я сразу удалю из чата.")
+
     def queue_text(self) -> str:
         lines = []
         for status, label in (("pending", "Ждут одобрения"), ("approved", "Одобрены, ждут публикации")):
@@ -649,6 +687,9 @@ class AdminBot:
         return "\n".join([
             f"Автопубликация: {'на паузе' if self.paused else 'включена'}",
             f"Instagram: {'подключён' if self.s.instagram_ready() else 'не подключён — публикуешь вручную'}",
+            self.s.vk_status(),
+            f"Тексты роликов пишет: {self.cfg.copy_model or 'основная модель'}"
+            + (f" (⚠️ {self.db.get('last_copy_error')[:150]})" if self.db.get("last_copy_error") else ""),
             f"Источник фото: {self.cfg.image_source}; сгенерировано сегодня: "
             f"{images.images_used_today(self.db)} из {self.cfg.max_images_per_day}",
             f"Библиотека: {lib['n'] or 0} фото, размечено {lib['t'] or 0}",
@@ -685,10 +726,25 @@ class AdminBot:
                 self.say(post["caption"] or "(пусто)")
             return
 
+        if action == "vkretry":
+            self.api.answer_callback(cq["id"])
+            if self.s.vk_retry:
+                self.say(self.s.vk_retry(post_id))
+            return
+
         if action in ("ok", "now"):
             if not self.db.claim_post(post_id, "pending", "approved"):
                 self.api.answer_callback(cq["id"], "Уже обработан")
                 return
+            other = ""
+            if self.s.on_approved:
+                try:
+                    other = self.s.on_approved(post_id, action == "now")
+                except Exception as e:  # noqa: BLE001 — Instagram важнее, сообщим и продолжим
+                    log.exception("on_approved #%s", post_id)
+                    other = f"⚠️ Другие площадки: {e}"
+            if other:
+                self.say(other)
             if not self.s.instagram_ready():
                 self.db.update_post(post_id, status="manual")
                 self.api.answer_callback(cq["id"], "Готово к ручной публикации")
