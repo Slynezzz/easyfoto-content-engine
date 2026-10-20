@@ -277,6 +277,8 @@ class Engine:
         if not self._once(f"analysis:{now:%G-W%V}"):
             return False
         self.say(analyst.run(self.cfg, self.db, self.ai))
+        if self.bot:
+            self.bot.send_brief_proposals()
         return True
 
     def job_cleanup(self, keep_days: int = 7) -> int:
@@ -378,7 +380,11 @@ def main() -> None:
     if not bot:
         log.warning("ADMIN_BOT_TOKEN не задан — работаю без админ-бота")
     elif cfg.admin_chat_id:
-        bot.say("🟢 Контент-движок запущен. /help — команды.")
+        gen = {"mixed": f"новые кадры примерно в {cfg.generate_share:.0%} роликов",
+               "generate": "новые кадры в каждом ролике",
+               "library": "только готовые фото, без генерации"}.get(cfg.image_source, cfg.image_source)
+        bot.say(f"🟢 Контент-движок запущен. Фото: {gen}; лимит генерации {cfg.max_images_per_day} кадров "
+                "в сутки. /help — команды.")
 
     def poll_loop():
         while True:

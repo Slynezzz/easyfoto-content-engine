@@ -41,3 +41,19 @@ def save(cfg: Config, text: str) -> None:
 
 def reset(cfg: Config) -> None:
     path(cfg).unlink(missing_ok=True)
+
+
+NOTES_HEADER = "## Уточнения по статистике аккаунта"
+
+
+def append_note(cfg: Config, note: str) -> None:
+    """Добавляет одобренное уточнение в бриф (создаёт свой бриф из стандартного, если его ещё нет)."""
+    text = load(cfg)
+    if NOTES_HEADER not in text:
+        text = text.rstrip() + f"\n\n{NOTES_HEADER}\n"
+    text = text.rstrip() + f"\n- {note.strip()}\n"
+    if len(text) > MAX_CHARS:
+        raise ValueError("бриф стал слишком длинным — сократи его вручную (/brief) и пришли файлом")
+    p = path(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")

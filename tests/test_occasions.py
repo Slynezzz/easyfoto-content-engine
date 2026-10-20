@@ -198,8 +198,13 @@ class ScoutEventsTests(unittest.TestCase):
             {"title": "первый снег", "date": "2026-11-06", "scenes": ["a", "b"]},
         ], date(2026, 10, 25))
         self.assertEqual(added, ["05.11 — Первый снег"])
+        self.assertTrue(pb["events"][0]["id"].startswith("ev_1105_"))
         self.assertEqual([e["title"] for e in pb["events"]], ["Первый снег"])
         self.assertIn("ev1", [o.id for o in occasions.active(date(2026, 11, 3), [dict(pb["events"][0], id="ev1")])])
+        many = [{"title": f"Событие {i}", "date": f"2026-11-{i + 1:02d}", "scenes": ["a", "b"]} for i in range(15)]
+        scout.merge_events(pb, many, date(2026, 10, 25))
+        self.assertEqual(pb["events"][0]["date"], "2026-11-01")  # ближайшие сохраняются
+        self.assertEqual(len(pb["events"]), scout.MAX_EVENTS)
 
 
 if __name__ == "__main__":

@@ -86,3 +86,28 @@ class PhotoManagerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PhotoManagerEdgeTests(PhotoManagerTests):
+    def test_single_photo_page_uses_send_photo(self):
+        self.bot.handle(cb("pf:before:0"))
+        self.api.send_photo.assert_called_once()
+        self.api.send_media_group.assert_not_called()
+        self.assertEqual(self.said[-1][1]["inline_keyboard"][0][0]["text"], "1")
+
+    def test_unreadable_file_keeps_numbers_aligned(self):
+        rows = self.db.assets("library")
+        Path(rows[1]["path"]).write_bytes(b"broken")
+        self.bot.handle(cb("pf:library:0"))
+        captions = self.api.send_media_group.call_args.args[2]
+        self.assertEqual(captions[:2], ["1.", "3."])
+        buttons = {b["text"]: b["callback_data"] for r in self.said[-1][1]["inline_keyboard"] for b in r}
+        self.assertNotIn("2", buttons)
+        self.assertEqual(buttons["3"], f"pa:{rows[2]['id']}")
+        self.assertIn("Не читаются файлов: 1", self.said[-1][0])
+
+    def test_album_failure_still_sends_buttons(self):
+        from engine.telegram import TelegramError
+        self.api.send_media_group.side_effect = TelegramError("sendMediaGroup: bad")
+        self.bot.handle(cb("pf:library:0"))
+        self.assertIn("Выбери номер фото", self.said[-1][0])

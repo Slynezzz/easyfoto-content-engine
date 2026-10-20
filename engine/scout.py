@@ -13,6 +13,7 @@ Gemini с поиском Google изучает свежие материалы �
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -155,12 +156,13 @@ def merge_events(pb: dict, events: list, today: date) -> list[str]:
         scenes = [str(x)[:120] for x in (ev.get("scenes") or []) if str(x).strip()][:5]
         if not title or title.lower() in titles or len(scenes) < 2 or not (today <= day <= today + timedelta(days=30)):
             continue
-        kept.append({"id": f"ev_{day:%m%d}_{_slug(title) or len(kept)}", "title": title, "date": day.isoformat(),
+        uid = hashlib.md5(title.lower().encode()).hexdigest()[:8]
+        kept.append({"id": f"ev_{day:%m%d}_{uid}", "title": title, "date": day.isoformat(),
                      "scenes": scenes, "lead": 3, "after": 1, "weight": 2, "max_reels": 1,
                      "note": str(ev.get("why") or "")[:160]})
         titles.add(title.lower())
         added.append(f"{day:%d.%m} — {title}")
-    pb["events"] = sorted(kept, key=lambda e: e["date"])[-MAX_EVENTS:]
+    pb["events"] = sorted(kept, key=lambda e: e["date"])[:MAX_EVENTS]  # ближайшие важнее
     return added
 
 

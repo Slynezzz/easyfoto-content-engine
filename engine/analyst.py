@@ -32,7 +32,11 @@ INSIGHT_SYSTEM = """Ты аналитик коротких видео. По та
 сформулируй 3–6 коротких практических выводов для сценариста: какие хуки, форматы и темы
 работают, что избегать, что попробовать. Только то, что следует из данных; если данных мало —
 так и скажи. Каждый вывод — одно предложение до 140 символов.
-Ответ JSON: {"insights": ["...", "..."], "summary": "2–3 предложения для владельца"}"""
+Кроме того, предложи 0–3 правки брифа продукта (кому и как продавать), если данные дают
+для этого основание: например, какой сегмент аудитории или какой довод работает лучше.
+Каждая правка — одно законченное утверждение до 200 символов, которое можно дописать в бриф.
+Ответ JSON: {"insights": ["...", "..."], "summary": "2–3 предложения для владельца",
+"brief_updates": ["...", "..."]}"""
 
 
 def skip_scale(values: list) -> float:
@@ -113,6 +117,7 @@ def _table(scored: list[dict], pb: dict) -> str:
 
 def run(cfg: Config, db: DB, ai: AI | None) -> str:
     """Пересчитывает плейбук. Возвращает отчёт для владельца."""
+    db.set("brief_proposals", "[]")  # старые предложения не показываем повторно
     rows = eligible_rows(db)
     if len(rows) < MIN_POSTS:
         return (f"Для выводов пока мало данных: {len(rows)} роликов со статистикой старше 2 суток, "
@@ -129,6 +134,8 @@ def run(cfg: Config, db: DB, ai: AI | None) -> str:
             if got:
                 insights = got
             summary = str(res.get("summary") or "")[:600]
+            updates = [str(x).strip()[:220] for x in (res.get("brief_updates") or []) if str(x).strip()][:3]
+            db.set("brief_proposals", json.dumps(updates, ensure_ascii=False))
         except (AIError, AttributeError) as e:
             log.warning("insights failed: %s", e)
 

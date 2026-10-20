@@ -85,8 +85,8 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
             except AIError as e:
                 errors.append(str(e))
                 log.warning("генерация сцены «%s» не удалась: %s", scene.get("title"), e)
-                if len(errors) >= 2 and not ids:
-                    break  # два отказа подряд с самого начала — дальше не тратим токены
+                if (len(errors) >= 2 and not ids) or "дневной лимит" in str(e):
+                    break  # два отказа с самого начала или лимит — дальше не тратим токены
         rows = [db.one("SELECT * FROM assets WHERE id=?", (i,)) for i in ids]
         if errors:
             db.set("last_image_error", errors[-1][:300])

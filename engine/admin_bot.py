@@ -307,6 +307,51 @@ class AdminBot:
             tmp.unlink(missing_ok=True)
         self.say(f"Бриф обновлён ({len(text)} символов). Сценарист и разведчик используют его со следующего ролика.")
 
+    def send_brief_proposals(self) -> int:
+        try:
+            props = json.loads(self.db.get("brief_proposals") or "[]")
+        except ValueError:
+            props = []
+        sent = 0
+        for i, text in enumerate(props):
+            if not text:
+                continue
+            sent += 1
+            self.say(f"Предлагаю дописать в бриф:\n«{text}»",
+                     {"inline_keyboard": [[{"text": "✅ Добавить", "callback_data": f"bok:{i}"},
+                                           {"text": "❌ Не нужно", "callback_data": f"bno:{i}"}]]})
+        return sent
+
+    def on_brief_callback(self, cq: dict, data: str) -> None:
+        if cq["from"]["id"] != self.admin:
+            self.api.answer_callback(cq["id"])
+            return
+        action, _, raw = data.partition(":")
+        msg_id = (cq.get("message") or {}).get("message_id")
+        try:
+            props = json.loads(self.db.get("brief_proposals") or "[]")
+            text = props[int(raw)]
+        except (ValueError, IndexError):
+            self.api.answer_callback(cq["id"], "Предложение устарело")
+            return
+        if not text:
+            self.api.answer_callback(cq["id"], "Уже обработано")
+            return
+        props[int(raw)] = ""  # повторное нажатие ничего не сделает
+        self.db.set("brief_proposals", json.dumps(props, ensure_ascii=False))
+        if action == "bok":
+            try:
+                brief.append_note(self.cfg, text)
+            except ValueError as e:
+                self.api.answer_callback(cq["id"])
+                self.say(f"Не добавил: {e}")
+                return
+            self.api.answer_callback(cq["id"], "Добавлено в бриф")
+            self.api.edit_markup(self.admin, msg_id, _status_keyboard("✅ В брифе"))
+        else:
+            self.api.answer_callback(cq["id"], "Пропущено")
+            self.api.edit_markup(self.admin, msg_id, _status_keyboard("❌ Пропущено"))
+
     def send_brief(self) -> None:
         text = brief.load(self.cfg)
         head = ("Сейчас используется твой бриф." if brief.is_custom(self.cfg)
@@ -346,25 +391,34 @@ class AdminBot:
         if not rows:
             self.say(f"В папке «{self.PHOTO_KINDS.get(kind, kind)}» пусто.")
             return
-        thumbs, captions = [], []
+        thumbs, captions, ok_rows = [], [], []
         try:
             for i, r in enumerate(rows):
                 try:
                     thumbs.append(self._thumb_file(r["path"], i))
                 except OSError:
-                    continue
-                captions.append(f"{offset + len(thumbs)}. {r['title'] or ''}".strip())
-            if thumbs:
-                self.api.send_media_group(self.admin, thumbs, captions)
+                    continue  # файл не читается — без кнопки, чтобы номера не съехали
+                ok_rows.append((offset + i + 1, r))
+                captions.append(f"{offset + i + 1}. {r['title'] or ''}".strip())
+            try:
+                if len(thumbs) == 1:  # альбом в Telegram — от 2 фото
+                    self.api.send_photo(self.admin, thumbs[0], captions[0])
+                elif thumbs:
+                    self.api.send_media_group(self.admin, thumbs, captions)
+            except TelegramError as e:
+                log.warning("album: %s", e)
+                self.say("Миниатюры не отправились, но кнопки ниже работают.")
         finally:
             for t in thumbs:
                 t.unlink(missing_ok=True)
-        buttons = [{"text": str(offset + i + 1), "callback_data": f"pa:{r['id']}"} for i, r in enumerate(rows)]
+        broken = len(rows) - len(ok_rows)
+        buttons = [{"text": str(num), "callback_data": f"pa:{r['id']}"} for num, r in ok_rows]
         keyboard = [buttons[:5], buttons[5:]] if len(buttons) > 5 else [buttons]
         if offset + self.PAGE < total:
             keyboard.append([{"text": "Дальше ▶", "callback_data": f"pf:{kind}:{offset + self.PAGE}"}])
+        note = f" Не читаются файлов: {broken} — их лучше удалить и загрузить заново." if broken else ""
         self.say(f"{self.PHOTO_KINDS.get(kind, kind)}: {offset + 1}–{offset + len(rows)} из {total}. "
-                 "Выбери номер фото:", {"inline_keyboard": [k for k in keyboard if k]})
+                 f"Выбери номер фото:{note}", {"inline_keyboard": [k for k in keyboard if k]})
 
     def photo_actions(self, asset_id: int) -> None:
         row = self.db.one("SELECT * FROM assets WHERE id=?", (asset_id,))
@@ -558,7 +612,8 @@ class AdminBot:
         return "\n".join([
             f"Автопубликация: {'на паузе' if self.paused else 'включена'}",
             f"Instagram: {'подключён' if self.s.instagram_ready() else 'не подключён — публикуешь вручную'}",
-            f"Источник фото: {self.cfg.image_source}",
+            f"Источник фото: {self.cfg.image_source}; сгенерировано сегодня: "
+            f"{images.images_used_today(self.db)} из {self.cfg.max_images_per_day}",
             f"Библиотека: {lib['n'] or 0} фото, размечено {lib['t'] or 0}",
             f"Селфи «до»: {len(self.db.assets('before'))}, референсов: {len(self.db.assets('ref'))}",
             f"Нейросеть: {'⚠️ ' + self.db.get('last_ai_error') if self.db.get('last_ai_error') else 'отвечает'}"
@@ -575,6 +630,9 @@ class AdminBot:
         msg = cq.get("message") or {}
         if data.split(":", 1)[0] in ("pf", "pa", "pd", "pm"):
             self.on_photo_callback(cq, data)
+            return
+        if data.split(":", 1)[0] in ("bok", "bno"):
+            self.on_brief_callback(cq, data)
             return
         action, _, raw_id = data.partition(":")
         if action == "noop" or not raw_id.isdigit():

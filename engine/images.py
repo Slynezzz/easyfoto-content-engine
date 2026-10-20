@@ -185,6 +185,22 @@ def pick_refs(db: DB, k: int = 8) -> list[str]:
     return list(dict.fromkeys(refs))[:k]
 
 
+def _spend_image_budget(cfg: Config, db: DB) -> None:
+    """Дневной предохранитель расхода: не больше max_images_per_day кадров в сутки (UTC)."""
+    from datetime import datetime, timezone
+    key = f"images_used:{datetime.now(timezone.utc):%Y-%m-%d}"
+    used = int(db.get(key, "0") or 0)
+    if used >= cfg.max_images_per_day:
+        raise AIError(f"дневной лимит генерации исчерпан: {used} кадров (MAX_IMAGES_PER_DAY). "
+                      "Завтра лимит обновится; поднять его можно в переменных Railway")
+    db.set(key, str(used + 1))
+
+
+def images_used_today(db: DB) -> int:
+    from datetime import datetime, timezone
+    return int(db.get(f"images_used:{datetime.now(timezone.utc):%Y-%m-%d}", "0") or 0)
+
+
 def _generate_image(cfg: Config, ai: AI, refs: list[str], scene: dict) -> tuple[Image.Image, str]:
     """Генерирует кадр по сцене. Возвращает (картинка, каким путём получена)."""
     prompt = f"{core_prompt(cfg)}\n\n{scene_prompt(scene)}"
@@ -221,6 +237,7 @@ def generate(cfg: Config, db: DB, ai: AI, scene: dict, theme: str) -> int:
     refs = pick_refs(db)
     if not refs:
         raise AIError("нет фото лица: пришли в админ-бот свои фото с подписью «реф» или «до»")
+    _spend_image_budget(cfg, db)
     im, _ = _generate_image(cfg, ai, refs, scene)
     out = cfg.assets_dir / "generated" / f"{uuid.uuid4().hex[:12]}.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -241,6 +258,7 @@ def test_generate(cfg: Config, db: DB, ai: AI, scene: dict | None = None) -> tup
     refs = pick_refs(db)
     if not refs:
         raise AIError("нет фото лица: пришли в админ-бот свои фото с подписью «реф» или «до»")
+    _spend_image_budget(cfg, db)
     t0 = time.time()
     im, provider = _generate_image(cfg, ai, refs, scene or TEST_SCENE)
     out = cfg.data_dir / "work" / f"imgtest_{uuid.uuid4().hex[:8]}.jpg"

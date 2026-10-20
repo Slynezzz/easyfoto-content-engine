@@ -56,6 +56,10 @@ class FakeBot:
         self.sent.append(pid)
         return True
 
+    def send_brief_proposals(self):
+        self.brief_offers = getattr(self, "brief_offers", 0) + 1
+        return 0
+
     def push_rendered(self):
         return 0
 

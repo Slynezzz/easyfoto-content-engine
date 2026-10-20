@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import base64
+import binascii
+import io
 import json
 import logging
 import mimetypes
@@ -79,11 +81,18 @@ class ImageResult:
     provider: str
 
 
-def _post(url: str, *, retries: int = 3, timeout: int = 120, **kw) -> dict:
+def _post(url: str, *, retries: int = 3, timeout: int = 120, retry_timeouts: bool = True, **kw) -> dict:
+    """POST с повторами при сбоях. retry_timeouts=False — для платной генерации картинок:
+    если ответа не дождались, посредник мог уже сгенерировать и списать токены,
+    поэтому повторять не стоит."""
     last: Exception | None = None
     for attempt in range(retries):
         try:
             r = requests.post(url, timeout=timeout, **kw)
+        except requests.Timeout as e:
+            if not retry_timeouts:
+                raise AIError(f"посредник не ответил за {timeout} с (повтор не делаю, чтобы не платить дважды)") from None
+            last = e
         except requests.RequestException as e:
             last = e
         else:
@@ -438,9 +447,11 @@ class AI:
             base = _root(cfg.openai_base_url)
             routes += [("OpenAI", "edits", base, cfg.openai_api_key, cfg.openai_image_model),
                        ("OpenAI", "chat", base, cfg.openai_api_key, cfg.openai_image_model)]
-        # сработавший раньше путь — первым
+        # сработавший раньше путь — первым и с той моделью, что сработала
         if getattr(self, "image_route", None):
-            routes.sort(key=lambda r: r[:3] != self.image_route[:3])
+            name, mode, base, model = self.image_route
+            routes = [(r[0], r[1], r[2], r[3], model) if r[:3] == (name, mode, base) else r for r in routes]
+            routes.sort(key=lambda r: r[:3] != (name, mode, base))
         return routes
 
     def image(self, prompt: str, refs: list[str | Path]) -> ImageResult:
@@ -511,21 +522,22 @@ class AI:
         headers = {"Authorization": f"Bearer {key}"}
         url = f"{base}/v1/images/edits"
         try:
-            data = _post(url, timeout=240, headers=headers, data=form, files=files, retries=2)
+            data = _post(url, timeout=240, headers=headers, data=form, files=files, retries=2,
+                         retry_timeouts=False)
         except AIError as e:
             # input_fidelity и quality понимают не все модели — повторяем без них.
             if not any(x in str(e) for x in ("input_fidelity", "quality")):
                 raise
             form.pop("input_fidelity", None)
             form.pop("quality", None)
-            data = _post(url, timeout=240, headers=headers, data=form, files=files, retries=2)
+            data = _post(url, timeout=240, headers=headers, data=form, files=files, retries=2,
+                         retry_timeouts=False)
         img = extract_image(data)
         if not img:
             raise AIRefused("посредник не вернул изображение")
         return ImageResult(img[0], img[1], "edits")
 
-    @staticmethod
-    def _chat_image(base, key, model, prompt, refs):
+    def _chat_image(self, base, key, model, prompt, refs):
         content: list[dict] = []
         for p in refs[:8]:
             part = _image_part(p)["inlineData"]
@@ -535,12 +547,20 @@ class AI:
         body = {"model": model, "messages": [{"role": "user", "content": content}]}
         url = f"{base}/v1/chat/completions"
         headers = {"Authorization": f"Bearer {key}"}
-        data = _post(url, headers=headers, json=body, timeout=240, retries=2)
+        needs = getattr(self, "_needs_modalities", set())
+        self._needs_modalities = needs
+        if (base, model) in needs:
+            body["modalities"] = ["image", "text"]
+        data = _post(url, headers=headers, json=body, timeout=240, retries=2, retry_timeouts=False)
         img = extract_image(data)
-        if not img:
-            # некоторые посредники отдают картинку, только если явно попросить
-            data = _post(url, headers=headers, json={**body, "modalities": ["image", "text"]}, timeout=240, retries=1)
+        if not img and "modalities" not in body and _empty_content(data):
+            # Пустой ответ: некоторые посредники отдают картинку, только если явно попросить.
+            # Текстовый ответ уже оплачен — его не повторяем.
+            data = _post(url, headers=headers, json={**body, "modalities": ["image", "text"]},
+                         timeout=240, retries=1, retry_timeouts=False)
             img = extract_image(data)
+            if img:
+                needs.add((base, model))
         if not img:
             text = ""
             try:
@@ -594,7 +614,7 @@ def rank_image_models(ids: list[str], exclude: str = "") -> list[str]:
     return sorted(cands, key=key)
 
 
-_DATA_URL = re.compile(r"data:(image/[a-zA-Z+.-]+);base64,([A-Za-z0-9+/=\s]+)")
+_DATA_URL = re.compile(r"data:(image/[a-zA-Z+.-]+);base64,([A-Za-z0-9+/=\r\n]+)")
 _HTTP_IMG = re.compile(r"https?://[^\s)\]\"']+\.(?:png|jpe?g|webp)(?:\?[^\s)\]\"']*)?", re.I)
 
 
@@ -612,8 +632,37 @@ def _from_url(url: str) -> tuple[bytes, str] | None:
     return None
 
 
+def _empty_content(data) -> bool:
+    try:
+        content = data["choices"][0]["message"].get("content")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return True
+    return not content or (isinstance(content, str) and not content.strip())
+
+
+def _is_image(raw: bytes) -> bool:
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(raw)) as im:
+            im.verify()
+        return True
+    except Exception:  # noqa: BLE001 — любой сбой разбора значит «не картинка»
+        return False
+
+
 def extract_image(data) -> tuple[bytes, str] | None:
-    """Картинка из ответа посредника в любом из распространённых форматов."""
+    """Картинка из ответа посредника в любом из распространённых форматов.
+    Битые данные и ссылки не на картинку считаются отсутствием картинки."""
+    try:
+        got = _extract_image_raw(data)
+    except (binascii.Error, ValueError, TypeError):
+        return None
+    if got and not _is_image(got[0]):
+        return None
+    return got
+
+
+def _extract_image_raw(data) -> tuple[bytes, str] | None:
     if not isinstance(data, dict):
         return None
     for item in data.get("data") or []:                          # images API

@@ -239,6 +239,27 @@ class AdminBotTests(unittest.TestCase):
         self.bot.handle(msg("/resume"))
         self.assertFalse(self.bot.paused)
 
+    def test_approved_note_lands_in_brief_once(self):
+        import json as js
+        from engine import brief
+        self.db.set("brief_proposals", js.dumps(["Сегмент «аватарка» конвертирует лучше всего", "Второе"]))
+        self.assertEqual(self.bot.send_brief_proposals(), 2)
+        self.bot.handle(cb("bok:0"))
+        self.bot.handle(cb("bok:0"))  # повторное нажатие
+        self.bot.handle(cb("bno:1"))
+        text = brief.load(self.cfg)
+        self.assertEqual(text.count("Сегмент «аватарка» конвертирует лучше всего"), 1)
+        self.assertNotIn("Второе", text)
+        self.assertIn("3 бесплатные генерации", text)  # дописали к стандартному брифу
+        self.assertEqual(self.bot.send_brief_proposals(), 0)
+
+    def test_stranger_cannot_approve(self):
+        import json as js
+        from engine import brief
+        self.db.set("brief_proposals", js.dumps(["X"]))
+        self.bot.handle(cb("bok:0", user=999))
+        self.assertFalse(brief.is_custom(self.cfg))
+
 
 if __name__ == "__main__":
     unittest.main()

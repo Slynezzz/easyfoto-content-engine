@@ -162,3 +162,83 @@ class PickRefsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewFixTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.refs = [make(self.tmp / "r.jpg", (600, 900), 1)]
+        self.cfg = Config(data_dir=self.tmp, gemini_api_key="g", gemini_base_url="https://saint.example",
+                          gemini_api_style="openai", openai_api_key="", image_api_key="")
+        self.sleep = mock.patch("engine.llm.time.sleep")
+        self.sleep.start()
+
+    def tearDown(self):
+        self.sleep.stop()
+
+    def test_trailing_text_after_base64_is_not_a_crash(self):
+        data = {"choices": [{"message": {"content": f"![x](data:image/png;base64,{B64})\n\nHere is your image"}}]}
+        self.assertIsNotNone(extract_image(data))
+        broken = {"choices": [{"message": {"content": "data:image/png;base64,AAAA=AAA"}}]}
+        self.assertIsNone(extract_image(broken))
+
+    def test_link_to_non_image_is_rejected(self):
+        page = mock.Mock(status_code=200, content=b"<html>not an image</html>", headers={"Content-Type": "text/html"})
+        with mock.patch("engine.llm.requests.get", return_value=page):
+            self.assertIsNone(extract_image({"choices": [{"message": {"content": "https://x.example/a.png"}}]}))
+
+    def test_text_answer_is_not_retried_with_modalities(self):
+        calls = []
+
+        def post(url, timeout=None, json=None, **kw):
+            calls.append(json)
+            return Resp(200, {"choices": [{"message": {"content": "Не могу нарисовать"}}]})
+        with mock.patch("engine.llm.requests.post", side_effect=post):
+            with self.assertRaises(AIRefused):
+                AI(self.cfg).image("сцена", self.refs)
+        self.assertEqual(len(calls), 1)
+
+    def test_empty_answer_retries_with_modalities_and_remembers(self):
+        calls = []
+
+        def post(url, timeout=None, json=None, **kw):
+            calls.append("modalities" in json)
+            if "modalities" in json:
+                return Resp(200, {"choices": [{"message": {"content": "", "images": [
+                    {"image_url": {"url": f"data:image/png;base64,{B64}"}}]}}]})
+            return Resp(200, {"choices": [{"message": {"content": ""}}]})
+        ai = AI(self.cfg)
+        with mock.patch("engine.llm.requests.post", side_effect=post):
+            ai.image("сцена", self.refs)
+            ai.image("сцена", self.refs)
+        self.assertEqual(calls, [False, True, True])
+
+    def test_timeout_is_not_retried(self):
+        import requests as rq
+        with mock.patch("engine.llm.requests.post", side_effect=rq.Timeout("slow")) as post:
+            with self.assertRaises(AIError) as ctx:
+                AI(self.cfg).image("сцена", self.refs)
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("не платить дважды", str(ctx.exception))
+
+    def test_working_model_is_reused(self):
+        ai = AI(self.cfg)
+        ai.image_route = ("Gemini", "chat", "https://saint.example", "gemini-3.1-flash-image")
+        self.assertEqual(ai.image_routes()[0][4], "gemini-3.1-flash-image")
+
+    def test_daily_image_budget(self):
+        cfg = Config(data_dir=self.tmp / "d", max_images_per_day=2)
+        cfg.ensure_dirs()
+        db = DB(cfg.db_path)
+        make(cfg.assets_dir / "refs" / "a.jpg", (600, 900), 1)
+        images.scan(cfg, db)
+        ai = mock.Mock()
+        ai.image.return_value = mock.Mock(data=base64.b64decode(B64), provider="x")
+        images.generate(cfg, db, ai, {"title": "a"}, "cinema")
+        images.test_generate(cfg, db, ai)
+        with self.assertRaises(AIError) as ctx:
+            images.generate(cfg, db, ai, {"title": "b"}, "cinema")
+        self.assertIn("дневной лимит", str(ctx.exception))
+        self.assertEqual(ai.image.call_count, 2)
+        self.assertEqual(images.images_used_today(db), 2)
+        db.close()

@@ -65,6 +65,8 @@ class Config:
     generate_share: float = field(default_factory=lambda: _float("GENERATE_SHARE", 0.7))
     # Сколько новых кадров генерировать на ролик (каждый кадр тратит токены посредника)
     generate_photos: int = field(default_factory=lambda: _int("GENERATE_PHOTOS", 4))
+    # Предохранитель: не больше стольких сгенерированных кадров в сутки (токены посредника платные)
+    max_images_per_day: int = field(default_factory=lambda: _int("MAX_IMAGES_PER_DAY", 16))
     # Сколько роликов в день отдавать под праздники и инфоповоды, когда они есть
     occasions_per_day: int = field(default_factory=lambda: _int("OCCASIONS_PER_DAY", 1))
     persona_gender: str = field(default_factory=lambda: _env("PERSONA_GENDER", "male"))  # male | female
