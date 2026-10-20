@@ -414,34 +414,86 @@ class AI:
         return out
 
     # ---------------------------------------------------------- картинки
-    def image(self, prompt: str, refs: list[str | Path]) -> ImageResult:
-        """Генерация фото по референсам. Gemini, при сбое — OpenAI."""
-        errors = []
-        if self.cfg.gemini_api_key:
-            try:
-                return self._gemini_image(prompt, refs)
-            except AIError as e:
-                errors.append(f"gemini: {e}")
-                log.warning("Gemini image failed: %s", e)
-        if self.cfg.openai_api_key:
-            try:
-                return self._openai_image(prompt, refs)
-            except AIError as e:
-                errors.append(f"openai: {e}")
-        raise AIError("; ".join(errors) or "не задан ни GEMINI_API_KEY, ни OPENAI_API_KEY")
+    def image_routes(self) -> list[tuple[str, str, str, str, str]]:
+        """Возможные пути генерации: (название, режим, адрес, ключ, модель).
 
-    def _gemini_image(self, prompt, refs):
-        if self.gemini_style == "openai":
-            raise AIError("генерация картинок Gemini через посредника в формате OpenAI не поддерживается")
+        Режимы: edits — OpenAI images/edits (референсы файлами);
+                chat — OpenAI chat/completions, картинка приходит в ответе
+                       (так многие посредники отдают Gemini Image);
+                native — Gemini в формате Google.
+        """
+        cfg = self.cfg
+        routes = []
+        img_key = getattr(cfg, "image_api_key", "")
+        if img_key:
+            base = _root(getattr(cfg, "image_api_base_url", "") or cfg.openai_base_url)
+            model = getattr(cfg, "image_model", "") or cfg.openai_image_model
+            routes += [("IMAGE_API", "edits", base, img_key, model), ("IMAGE_API", "chat", base, img_key, model)]
+        if cfg.gemini_api_key:
+            if self.gemini_style == "openai":
+                routes.append(("Gemini", "chat", self._gemini_root, cfg.gemini_api_key, cfg.gemini_image_model))
+            else:
+                routes.append(("Gemini", "native", self._gemini_root, cfg.gemini_api_key, cfg.gemini_image_model))
+        if cfg.openai_api_key:
+            base = _root(cfg.openai_base_url)
+            routes += [("OpenAI", "edits", base, cfg.openai_api_key, cfg.openai_image_model),
+                       ("OpenAI", "chat", base, cfg.openai_api_key, cfg.openai_image_model)]
+        # сработавший раньше путь — первым
+        if getattr(self, "image_route", None):
+            routes.sort(key=lambda r: r[:3] != self.image_route[:3])
+        return routes
+
+    def image(self, prompt: str, refs: list[str | Path]) -> ImageResult:
+        """Генерация фото по референсам: перебирает пути, пока один не сработает."""
+        errors = []
+        refused = 0
+        for name, mode, base, key, model in self.image_routes():
+            try:
+                res = self._image_via(mode, base, key, model, prompt, refs)
+            except AIRefused as e:
+                refused += 1
+                errors.append(f"{name}/{mode}: {e}")
+                continue
+            except AIError as e:
+                errors.append(f"{name}/{mode}: {str(e)[:200]}")
+                if MODEL_TROUBLE.search(str(e)) and mode == "chat":
+                    alt = self._pick_image_model(base, key, exclude=model)
+                    if alt:
+                        try:
+                            res = self._image_via(mode, base, key, alt, prompt, refs)
+                            model = alt
+                        except AIError as e2:
+                            errors.append(f"{name}/{mode} ({alt}): {str(e2)[:200]}")
+                            continue
+                    else:
+                        continue
+                else:
+                    continue
+            self.image_route = (name, mode, base, model)
+            res.provider = f"{name}/{mode}/{model}"
+            return res
+        if not errors:
+            raise AIError("не задан ни один ключ для генерации картинок")
+        cls = AIRefused if refused == len(errors) else AIError
+        raise cls("; ".join(errors))
+
+    def _image_via(self, mode, base, key, model, prompt, refs) -> ImageResult:
+        if mode == "native":
+            return self._gemini_image_native(model, prompt, refs)
+        if mode == "edits":
+            return self._edits_image(base, key, model, prompt, refs)
+        return self._chat_image(base, key, model, prompt, refs)
+
+    def _gemini_image_native(self, model, prompt, refs):
         parts = [_image_part(p) for p in refs] + [{"text": prompt}]
         body = {
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": "9:16"}},
         }
         try:
-            data = self._gemini_native(body, self.cfg.gemini_image_model, timeout=180)
+            data = self._gemini_native(body, model, timeout=180)
         except _SwitchToOpenAI:
-            return self._gemini_image(prompt, refs)
+            return self._chat_image(self._gemini_root, self.cfg.gemini_api_key, model, prompt, refs)
         for p in _gemini_parts(data):
             inline = p.get("inlineData") or p.get("inline_data")
             if inline and inline.get("data"):
@@ -449,26 +501,162 @@ class AI:
                                    inline.get("mimeType") or inline.get("mime_type") or "image/png", "gemini")
         raise AIRefused("Gemini не вернул изображение (вероятно, фильтр безопасности)")
 
-    def _openai_image(self, prompt, refs):
+    @staticmethod
+    def _edits_image(base, key, model, prompt, refs):
         files = []
         for p in refs[:10]:
             p = Path(p)
             files.append(("image[]", (p.name, p.read_bytes(), mimetypes.guess_type(p.name)[0] or "image/jpeg")))
-        form = {"model": self.cfg.openai_image_model, "prompt": prompt, "size": "1024x1536",
-                "quality": "high", "input_fidelity": "high"}
-        headers = {"Authorization": f"Bearer {self.cfg.openai_api_key}"}
+        form = {"model": model, "prompt": prompt, "size": "1024x1536", "quality": "high", "input_fidelity": "high"}
+        headers = {"Authorization": f"Bearer {key}"}
+        url = f"{base}/v1/images/edits"
         try:
-            data = _post(self._openai_url("images/edits"), timeout=240, headers=headers, data=form, files=files)
+            data = _post(url, timeout=240, headers=headers, data=form, files=files, retries=2)
         except AIError as e:
-            # input_fidelity поддерживают не все модели — повторяем без него.
-            if "input_fidelity" not in str(e):
+            # input_fidelity и quality понимают не все модели — повторяем без них.
+            if not any(x in str(e) for x in ("input_fidelity", "quality")):
                 raise
-            form.pop("input_fidelity")
-            data = _post(self._openai_url("images/edits"), timeout=240, headers=headers, data=form, files=files)
-        item = (data.get("data") or [{}])[0]
-        if not item.get("b64_json"):
-            raise AIRefused("OpenAI не вернул изображение")
-        return ImageResult(base64.b64decode(item["b64_json"]), "image/png", "openai")
+            form.pop("input_fidelity", None)
+            form.pop("quality", None)
+            data = _post(url, timeout=240, headers=headers, data=form, files=files, retries=2)
+        img = extract_image(data)
+        if not img:
+            raise AIRefused("посредник не вернул изображение")
+        return ImageResult(img[0], img[1], "edits")
+
+    @staticmethod
+    def _chat_image(base, key, model, prompt, refs):
+        content: list[dict] = []
+        for p in refs[:8]:
+            part = _image_part(p)["inlineData"]
+            content.append({"type": "image_url",
+                            "image_url": {"url": f"data:{part['mimeType']};base64,{part['data']}"}})
+        content.append({"type": "text", "text": prompt + "\n\nВерни одно изображение, вертикальное 9:16."})
+        body = {"model": model, "messages": [{"role": "user", "content": content}]}
+        url = f"{base}/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {key}"}
+        data = _post(url, headers=headers, json=body, timeout=240, retries=2)
+        img = extract_image(data)
+        if not img:
+            # некоторые посредники отдают картинку, только если явно попросить
+            data = _post(url, headers=headers, json={**body, "modalities": ["image", "text"]}, timeout=240, retries=1)
+            img = extract_image(data)
+        if not img:
+            text = ""
+            try:
+                text = str(data["choices"][0]["message"].get("content"))[:150]
+            except (KeyError, IndexError, TypeError, AttributeError):
+                pass
+            raise AIRefused(f"модель ответила без картинки{': ' + text if text else ''}")
+        return ImageResult(img[0], img[1], "chat")
+
+    def _pick_image_model(self, base, key, exclude: str = "") -> str | None:
+        """Модель для картинок из списка посредника (gemini-*-image или gpt-image)."""
+        try:
+            r = requests.get(f"{base}/v1/models", headers={"Authorization": f"Bearer {key}"}, timeout=30)
+            ids = [m["id"] for m in r.json().get("data", []) if isinstance(m, dict) and m.get("id")]
+        except (requests.RequestException, ValueError, AttributeError):
+            return None
+        return next(iter(rank_image_models(ids, exclude)), None)
+
+    def image_models_report(self) -> str:
+        lines = []
+        seen = set()
+        for name, mode, base, key, model in self.image_routes():
+            if (base, key) in seen or mode == "native":
+                continue
+            seen.add((base, key))
+            try:
+                r = requests.get(f"{base}/v1/models", headers={"Authorization": f"Bearer {key}"}, timeout=30)
+                ids = [m["id"] for m in r.json().get("data", []) if isinstance(m, dict) and m.get("id")]
+            except (requests.RequestException, ValueError, AttributeError) as e:
+                lines.append(f"{name}: список недоступен ({str(e)[:80]})")
+                continue
+            imgs = rank_image_models(ids)
+            host = base.split("://", 1)[-1]
+            lines.append(f"{name} ({host}): модели картинок — " + (", ".join(imgs[:12]) or "не найдено"))
+        return "\n".join(lines) or "Ключи для картинок не заданы"
+
+
+IMAGE_HINT = re.compile(r"image|imagen|dall|flux|seedream|banana", re.I)
+
+
+def rank_image_models(ids: list[str], exclude: str = "") -> list[str]:
+    """Модели, умеющие делать картинки по референсам: Gemini Image и gpt-image — первыми."""
+    cands = [m for m in dict.fromkeys(ids) if IMAGE_HINT.search(m) and m != exclude
+             and not re.search(r"embed|preview-tts|vision-only", m, re.I)]
+
+    def key(m: str):
+        low = m.lower()
+        family = 0 if ("gemini" in low and "image" in low) else 1 if "gpt-image" in low else 2
+        v = _VERSION.search(m.split("/")[-1])
+        return (family, -(float(v.group(1)) if v else 0.0), m)
+    return sorted(cands, key=key)
+
+
+_DATA_URL = re.compile(r"data:(image/[a-zA-Z+.-]+);base64,([A-Za-z0-9+/=\s]+)")
+_HTTP_IMG = re.compile(r"https?://[^\s)\]\"']+\.(?:png|jpe?g|webp)(?:\?[^\s)\]\"']*)?", re.I)
+
+
+def _from_url(url: str) -> tuple[bytes, str] | None:
+    m = _DATA_URL.match(url or "")
+    if m:
+        return base64.b64decode(re.sub(r"\s", "", m.group(2))), m.group(1)
+    if url and url.startswith("http"):
+        try:
+            r = requests.get(url, timeout=60)
+        except requests.RequestException:
+            return None
+        if r.status_code == 200 and r.content:
+            return r.content, r.headers.get("Content-Type", "image/png").split(";")[0]
+    return None
+
+
+def extract_image(data) -> tuple[bytes, str] | None:
+    """Картинка из ответа посредника в любом из распространённых форматов."""
+    if not isinstance(data, dict):
+        return None
+    for item in data.get("data") or []:                          # images API
+        if isinstance(item, dict):
+            if item.get("b64_json"):
+                return base64.b64decode(item["b64_json"]), "image/png"
+            got = _from_url(item.get("url", ""))
+            if got:
+                return got
+    for ch in data.get("choices") or []:                          # chat/completions
+        msg = (ch or {}).get("message") or {}
+        for im in msg.get("images") or []:                        # формат OpenRouter
+            url = (im.get("image_url") or {}).get("url") if isinstance(im, dict) else None
+            got = _from_url(url or "")
+            if got:
+                return got
+        content = msg.get("content")
+        parts = content if isinstance(content, list) else []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            url = (part.get("image_url") or {}).get("url") if isinstance(part.get("image_url"), dict) \
+                else part.get("image_url") or part.get("url")
+            if isinstance(url, str):
+                got = _from_url(url)
+                if got:
+                    return got
+            inline = part.get("inline_data") or part.get("inlineData")
+            if isinstance(inline, dict) and inline.get("data"):
+                return base64.b64decode(inline["data"]), inline.get("mime_type") or inline.get("mimeType") or "image/png"
+            if part.get("b64_json"):
+                return base64.b64decode(part["b64_json"]), "image/png"
+        text = content if isinstance(content, str) else " ".join(
+            p.get("text", "") for p in parts if isinstance(p, dict))
+        m = _DATA_URL.search(text or "")
+        if m:
+            return base64.b64decode(re.sub(r"\s", "", m.group(2))), m.group(1)
+        m = _HTTP_IMG.search(text or "")
+        if m:
+            got = _from_url(m.group(0))
+            if got:
+                return got
+    return None
 
 
 def _grounded(data: dict) -> tuple[dict | list, list[dict]]:

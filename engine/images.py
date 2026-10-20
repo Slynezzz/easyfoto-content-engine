@@ -176,18 +176,17 @@ def pick_library(db: DB, theme: str, n: int, rng: random.Random,
 
 
 def pick_refs(db: DB, k: int = 8) -> list[str]:
-    refs = [r["path"] for r in db.assets("ref")]
-    return refs[:k]
+    """Фото лица для генерации: сначала референсы, затем селфи «до» — это тоже твои
+    настоящие фото, они отлично подходят как образец внешности."""
+    refs = [r["path"] for r in db.assets("ref")] + [r["path"] for r in db.assets("before")]
+    return list(dict.fromkeys(refs))[:k]
 
 
-def generate(cfg: Config, db: DB, ai: AI, scene: dict, theme: str) -> int:
-    """Генерирует кадр по сцене. Возвращает id нового фото в базе."""
-    refs = pick_refs(db)
-    if not refs:
-        raise AIError("нет референсов: положи свои фото в assets/refs")
+def _generate_image(cfg: Config, ai: AI, refs: list[str], scene: dict) -> tuple[Image.Image, str]:
+    """Генерирует кадр по сцене. Возвращает (картинка, каким путём получена)."""
     prompt = f"{core_prompt(cfg)}\n\n{scene_prompt(scene)}"
     # Оригиналы «файлом» бывают по 5–20 МБ: 8 таких в одном запросе
-    # превышают лимит Gemini. Отправляем уменьшенные копии.
+    # превышают лимиты. Отправляем уменьшенные копии.
     work = cfg.data_dir / "work" / uuid.uuid4().hex[:8]
     work.mkdir(parents=True, exist_ok=True)
     small = []
@@ -207,9 +206,41 @@ def generate(cfg: Config, db: DB, ai: AI, scene: dict, theme: str) -> int:
         for f in work.glob("*"):
             f.unlink(missing_ok=True)
         work.rmdir()
-    im = Image.open(io.BytesIO(res.data)).convert("RGB")
+    try:
+        im = Image.open(io.BytesIO(res.data)).convert("RGB")
+    except OSError:
+        raise AIError("посредник вернул не картинку") from None
+    return im, res.provider
+
+
+def generate(cfg: Config, db: DB, ai: AI, scene: dict, theme: str) -> int:
+    """Генерирует кадр по сцене и сохраняет в базу. Возвращает id нового фото."""
+    refs = pick_refs(db)
+    if not refs:
+        raise AIError("нет фото лица: пришли в админ-бот свои фото с подписью «реф» или «до»")
+    im, _ = _generate_image(cfg, ai, refs, scene)
     out = cfg.assets_dir / "generated" / f"{uuid.uuid4().hex[:12]}.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
     im.save(out, "JPEG", quality=92)
     return db.add_asset(str(out), "generated", theme=theme, title=scene.get("title"),
                         description=f"{scene.get('where', '')}; {scene.get('wearing', '')}")
+
+
+TEST_SCENE = {"title": "Деловой портрет", "where": "светлый современный офис с большими окнами",
+              "wearing": "тёмно-синий пиджак и светлая рубашка без галстука",
+              "doing": "стоит, слегка улыбается, смотрит в камеру", "around": "размытый фон офиса",
+              "light": "мягкий дневной свет из окна, журнальный деловой портрет"}
+
+
+def test_generate(cfg: Config, db: DB, ai: AI, scene: dict | None = None) -> tuple[Path, str, float]:
+    """Пробный кадр для /imgtest: ничего не сохраняет в библиотеку."""
+    import time
+    refs = pick_refs(db)
+    if not refs:
+        raise AIError("нет фото лица: пришли в админ-бот свои фото с подписью «реф» или «до»")
+    t0 = time.time()
+    im, provider = _generate_image(cfg, ai, refs, scene or TEST_SCENE)
+    out = cfg.data_dir / "work" / f"imgtest_{uuid.uuid4().hex[:8]}.jpg"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    im.save(out, "JPEG", quality=90)
+    return out, provider, time.time() - t0

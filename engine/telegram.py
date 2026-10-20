@@ -64,6 +64,24 @@ class TelegramAPI:
                          reply_markup=reply_markup, supports_streaming="true",
                          width=1080, height=1920)
 
+    def send_photo(self, chat_id: int, path: str | Path, caption: str = "",
+                   reply_markup: dict | None = None) -> dict:
+        files = {"photo": (Path(path).name, Path(path).read_bytes(), "image/jpeg")}
+        return self.call("sendPhoto", http_timeout=120, files=files, chat_id=chat_id,
+                         caption=caption[:1024], reply_markup=reply_markup)
+
+    def send_media_group(self, chat_id: int, paths: list[str | Path], captions: list[str] | None = None) -> list:
+        """До 10 фото одним альбомом."""
+        files, media = {}, []
+        for i, p in enumerate(paths[:10]):
+            key = f"p{i}"
+            files[key] = (Path(p).name, Path(p).read_bytes(), "image/jpeg")
+            item = {"type": "photo", "media": f"attach://{key}"}
+            if captions and i < len(captions) and captions[i]:
+                item["caption"] = captions[i][:1024]
+            media.append(item)
+        return self.call("sendMediaGroup", http_timeout=180, files=files, chat_id=chat_id, media=media)
+
     def edit_markup(self, chat_id: int, message_id: int, reply_markup: dict | None) -> None:
         try:
             self.call("editMessageReplyMarkup", chat_id=chat_id, message_id=message_id,

@@ -29,6 +29,7 @@ HELP = """Команды:
 /status — состояние системы
 /ai — проверить ключи и модели нейросетей
 /models — какие модели есть у посредников
+/imgtest — сгенерировать пробный кадр по твоим фото
 /brief — что система знает о продукте и аудитории (можно заменить своим)
 /trends — обновить тренды прямо сейчас
 /stats — статистика роликов
@@ -56,6 +57,7 @@ class Services:
     check_ai: Callable[[], str] = lambda: "Проверка нейросетей недоступна"
     scout_trends: Callable[[], str] = lambda: "Разведчик трендов недоступен"
     models_report: Callable[[], str] = lambda: "Список моделей недоступен"
+    test_image: Callable[[], tuple] | None = None   # -> (путь к кадру, путь генерации, секунды)
 
 
 def approval_keyboard(post_id: int) -> dict:
@@ -246,6 +248,22 @@ class AdminBot:
         if not msg.get("media_group_id") or msg.get("caption") is not None or total % 5 == 0:
             self.say(f"Сохранил. Сейчас в {label}: {total}.")
 
+    def _image_test(self) -> None:
+        if not self.s.test_image:
+            self.say("Проверка генерации недоступна.")
+            return
+        try:
+            path, route, secs = self.s.test_image()
+        except Exception as e:  # noqa: BLE001
+            self.say(f"⚠️ Кадр не получился.\n{str(e)[:1500]}")
+            return
+        try:
+            self.api.send_photo(self.admin, path, f"✅ Генерация работает: {route}, {secs:.0f} с.\n"
+                                                  "Похож? Если сходство слабое — добавь референсов «реф» "
+                                                  "с разных ракурсов при хорошем свете.")
+        finally:
+            Path(path).unlink(missing_ok=True)
+
     # -------------------------------------------------------------- brief
     def on_brief_file(self, doc: dict) -> None:
         if (doc.get("file_size") or 0) > 200_000:
@@ -361,6 +379,9 @@ class AdminBot:
         elif cmd == "/models":
             self.say("Запрашиваю списки моделей у посредников…")
             self.run_bg(lambda: self.say(self.s.models_report()))
+        elif cmd == "/imgtest":
+            self.say("Генерирую пробный кадр по твоим фото, это 20–90 секунд…")
+            self.run_bg(self._image_test)
         elif cmd == "/trends":
             self.say("Смотрю свежие тренды Reels и Shorts, это займёт около минуты…")
             self.run_bg(lambda: self.say(self.s.scout_trends()))

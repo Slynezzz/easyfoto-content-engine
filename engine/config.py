@@ -42,6 +42,10 @@ class Config:
     openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY"))
     openai_text_model: str = field(default_factory=lambda: _env("OPENAI_TEXT_MODEL", "gpt-4.1-mini"))
     openai_image_model: str = field(default_factory=lambda: _env("OPENAI_IMAGE_MODEL", "gpt-image-1.5"))
+    # Отдельный ключ только для картинок (например, AI STAR для gpt-image, а тексты — через SaintStore)
+    image_api_base_url: str = field(default_factory=lambda: _env("IMAGE_API_BASE_URL").rstrip("/"))
+    image_api_key: str = field(default_factory=lambda: _env("IMAGE_API_KEY"))
+    image_model: str = field(default_factory=lambda: _env("IMAGE_MODEL"))
 
     # --- поиск для разведки трендов (ключ Google Cloud и id поисковика Programmable Search Engine)
     google_api_key: str = field(default_factory=lambda: _env("GOOGLE_API_KEY"))
