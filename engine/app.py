@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import analyst, images, playbook as pbm, scout, server
+from . import analyst, images, occasions, playbook as pbm, scout, server
 from .admin_bot import AdminBot, Services, retry_keyboard
 from .config import Config
 from .db import DB
@@ -73,9 +73,58 @@ class Engine:
         return True
 
     # -------------------------------------------------------------- actions
-    def make_one(self, scheduled_for: str | None = None) -> int:
+    def make_one(self, scheduled_for: str | None = None, occasion=None) -> int:
         pb = pbm.load(self.cfg.playbook_path)
-        return produce(self.cfg, self.db, self.ai, pb, self.now().date(), self.rng, scheduled_for)
+        return produce(self.cfg, self.db, self.ai, pb, self.now().date(), self.rng, scheduled_for,
+                       occasion=occasion)
+
+    # ------------------------------------------------------------- поводы
+    def _events(self) -> list[dict]:
+        return pbm.load(self.cfg.playbook_path).get("events", [])
+
+    def occasion_reels(self, occ, since_days: int) -> int:
+        cutoff = (self.now() - timedelta(days=since_days)).astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+        return self.db.one("SELECT COUNT(*) n FROM posts WHERE theme=? AND status NOT IN ('rejected') "
+                           "AND created_at >= ?", (occ.theme_id, cutoff))["n"]
+
+    def occasion_for_today(self, made_today: int):
+        """Повод для очередного ролика дня или None. Не больше occasions_per_day в день
+        и не больше max_reels на один повод за всё его окно."""
+        if made_today >= self.cfg.occasions_per_day:
+            return None
+        for occ in occasions.active(self.now().date(), self._events()):
+            if self.occasion_reels(occ, occ.lead + occ.after + 1) < occ.max_reels:
+                return occ
+        return None
+
+    def make_for(self, query: str) -> int:
+        """/make <повод>: «повод» — ближайший активный, иначе поиск по названию."""
+        today = self.now().date()
+        q = query.strip().lower()
+        if q in ("повод", "праздник"):
+            act = occasions.active(today, self._events())
+            occ = act[0] if act else None
+        else:
+            occ = occasions.find(q, today, self._events())
+        if not occ:
+            raise ValueError(f"не нашёл повод «{query}». Ближайшие поводы — /occasions")
+        return self.make_one(occasion=occ)
+
+    def occasions_text(self) -> str:
+        today = self.now().date()
+        events = self._events()
+        act = {o.id for o in occasions.active(today, events)}
+        items = occasions.upcoming(today, 30, events)
+        if not items:
+            return "В ближайшие 30 дней поводов в календаре нет."
+        lines = ["Поводы на 30 дней (● — уже идут ролики к поводу):"]
+        for o in items:
+            mark = "●" if o.id in act else "○"
+            src = " · инфоповод" if o.source == "trend" else ""
+            lines.append(f"{mark} {o.day:%d.%m} — {o.title}{src}")
+        lines.append("\nСобрать ролик к поводу сейчас: /make повод (ближайший) или /make <название>, "
+                     "например /make хэллоуин")
+        return "\n".join(lines)
 
     def publish(self, post_id: int) -> str:
         try:
@@ -109,14 +158,26 @@ class Engine:
         if now.hour < self.cfg.plan_hour:
             return 0
         made = 0
+        occ_today = self._occasion_posts_today()
         for slot in self.slots(now.date()):
             if slot <= now or self.slot_taken(slot):
                 continue
             key = f"plan:{slot.strftime(SLOT_FMT)}"
             if not self._once(key):
                 continue  # уже пытались (например, ролик отклонили) — не навязываем снова
+            occ = self.occasion_for_today(occ_today)
             try:
-                pid = self.make_one(slot.strftime(SLOT_FMT))
+                try:
+                    pid = self.make_one(slot.strftime(SLOT_FMT), occasion=occ)
+                    occ_today += 1 if occ else 0
+                except Exception as e:  # noqa: BLE001
+                    if not occ:
+                        raise
+                    # к поводу не получилось (например, генерация недоступна) — обычный ролик
+                    log.warning("ролик к поводу «%s» не собрался: %s", occ.title, e)
+                    occ_today = self.cfg.occasions_per_day  # сегодня к поводам больше не возвращаемся
+                    self.say(f"⚠️ Ролик к поводу «{occ.title}» не собрался: {str(e)[:300]}\nСобираю обычный.")
+                    pid = self.make_one(slot.strftime(SLOT_FMT))
             except Exception as e:  # noqa: BLE001
                 log.exception("plan failed")
                 self.say(f"⚠️ Не собрал ролик на {slot:%H:%M}: {e}\nМожно собрать вручную: /make")
@@ -125,6 +186,11 @@ class Engine:
             if self.bot:
                 self.bot.send_for_approval(pid)
         return made
+
+    def _occasion_posts_today(self) -> int:
+        start = datetime(self.now().year, self.now().month, self.now().day, tzinfo=self.tz)
+        return self.db.one("SELECT COUNT(*) n FROM posts WHERE theme LIKE 'occ:%' AND created_at >= ?",
+                           (start.astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds"),))["n"]
 
     def next_free_slot(self) -> datetime:
         now = self.now()
@@ -292,6 +358,8 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
             check_ai=lambda: "\n".join(ai.check()),
             models_report=lambda: ai.models_report() + "\n\n" + ai.image_models_report(),
             test_image=lambda: images.test_generate(cfg, db, ai),
+            make_for=engine.make_for,
+            occasions_text=engine.occasions_text,
             scout_trends=lambda: scout.run(cfg, db, ai),
         ))
         engine.bot = bot

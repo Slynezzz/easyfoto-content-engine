@@ -25,6 +25,8 @@ FORMAT_RU = {"before_after": "было → стало", "looks_carousel": "ка�
 
 HELP = """Команды:
 /make — собрать ролик прямо сейчас
+/make хэллоуин — ролик к поводу (или /make повод — к ближайшему)
+/occasions — праздники и инфоповоды на 30 дней
 /queue — что ждёт одобрения и публикации
 /status — состояние системы
 /ai — проверить ключи и модели нейросетей
@@ -58,6 +60,8 @@ class Services:
     scout_trends: Callable[[], str] = lambda: "Разведчик трендов недоступен"
     models_report: Callable[[], str] = lambda: "Список моделей недоступен"
     test_image: Callable[[], tuple] | None = None   # -> (путь к кадру, путь генерации, секунды)
+    make_for: Callable[[str], int] | None = None     # ролик к поводу по названию
+    occasions_text: Callable[[], str] = lambda: "Календарь поводов недоступен"
 
 
 def approval_keyboard(post_id: int) -> dict:
@@ -351,8 +355,23 @@ class AdminBot:
         args = args or []
         if cmd in ("/start", "/help"):
             self.say(HELP)
+        elif cmd == "/make" and args and self.s.make_for:
+            query = " ".join(args)
+            self.say(f"Собираю ролик к поводу «{query}»: генерирую новые кадры, это 3–6 минут…")
+
+            def job():
+                try:
+                    post_id = self.s.make_for(query)
+                except Exception as e:  # noqa: BLE001
+                    self.say(f"⚠️ Не получилось: {e}")
+                    return
+                if not self.send_for_approval(post_id):
+                    self.say(f"Ролик #{post_id} собран, отправлю его чуть позже.")
+            self.run_bg(job)
+        elif cmd == "/occasions":
+            self.say(self.s.occasions_text())
         elif cmd == "/make":
-            self.say("Собираю ролик, это займёт 1–3 минуты…")
+            self.say("Собираю ролик, это займёт 1–3 минуты (с генерацией новых кадров — до 6)…")
 
             def job():
                 post_id = self._make()

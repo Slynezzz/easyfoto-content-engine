@@ -71,8 +71,9 @@ class EngineTests(unittest.TestCase):
         self.engine = Engine(self.cfg, self.db, ai=None, ig=self.ig, bot=self.bot, now=self.clock)
         self.made = []
 
-        def fake_make(scheduled_for=None):
-            pid = self.db.create_post(status="rendered", format="worlds", hook_id="eras", theme="eras",
+        def fake_make(scheduled_for=None, occasion=None):
+            pid = self.db.create_post(status="rendered", format="worlds", hook_id="eras",
+                                      theme=occasion.theme_id if occasion else "eras",
                                       script_json={}, scheduled_for=scheduled_for)
             self.made.append((pid, scheduled_for))
             return pid

@@ -143,7 +143,10 @@ def pick_library(db: DB, theme: str, n: int, rng: random.Random,
     тему, где их хватает; если нигде не хватает — смесь (тема "mixed"),
     куда при нужде попадают и неразмеченные фото.
     """
-    library = db.assets("library")
+    # Сгенерированные раньше кадры — тоже библиотека, кроме праздничных:
+    # ёлка в июле никому не нужна.
+    library = db.assets("library") + [g for g in db.assets("generated")
+                                      if not (g["theme"] or "").startswith("occ:")]
     tagged = [r for r in library if r["title"]]
     by_theme: dict[str, list] = {}
     for r in tagged:

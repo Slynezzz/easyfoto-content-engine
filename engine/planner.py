@@ -113,7 +113,16 @@ def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None
           if choice.audience and choice.audience in pb.get("audiences", {}) else []),
         f"Автор: {'мужчина' if gender == 'male' else 'женщина'}, говорит от первого лица.",
     ]
-    if choice.occasion:
+    if theme.get("occasion"):
+        lines.append(f"ПОВОД РОЛИКА: {theme['occasion']}. Все кадры, хук и текст — в тему этого повода. "
+                     "Свяжи повод с ботом: своё фото к празднику за пару минут, без студии и записи. "
+                     "Поздравить аудиторию уместно, но коротко и без пафоса.")
+        if theme.get("profession"):
+            lines.append("Подача «я в профессии»: автор примеряет образ представителя профессии и "
+                         "поздравляет тех, кто в ней работает; предложи им сделать такое же фото.")
+        if theme.get("note"):
+            lines.append(f"Важно: {theme['note']}")
+    elif choice.occasion:
         lines.append(f"Сейчас сезон: {choice.occasion}. Обыграй повод, если уместно.")
     if photo_notes:
         lines.append("Фото уже готовы, подписи должны им соответствовать, по порядку:")

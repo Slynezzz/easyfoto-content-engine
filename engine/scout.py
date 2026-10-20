@@ -52,9 +52,14 @@ TikTok, VK Клипы) для русскоязычной аудитории. П�
   "trend_notes": ["практический приём: монтаж, подача, стиль текста на видео, длительность — одно предложение до 160 символов"],
   "themes": [{{"id": "латиница_через_подчёркивание", "title": "название по-русски",
               "scenes": ["4–5 сцен для фото в этой теме"], "why": "почему сейчас"}}],
+  "events": [{{"title": "инфоповод или мем по-русски", "date": "ГГГГ-ММ-ДД — когда это актуально",
+              "scenes": ["3–5 сцен, где автор в образе на эту тему"], "why": "почему зайдёт"}}],
   "summary": "2–3 предложения для владельца аккаунта: что изменилось в трендах"
 }}
-3–5 хуков, 3–6 заметок, 0–2 темы (только если есть явный актуальный повод).
+3–5 хуков, 3–6 заметок, 0–2 темы (только если есть явный актуальный повод),
+0–3 инфоповода на ближайшие 3 недели: события, вирусные мемы и тренды, к которым уместно
+сделать своё фото в тему. Без политики, трагедий, катастроф, войн, религиозных споров,
+брендов и знаменитостей; если подходящих нет — пустой список.
 Не повторяй хуки из списка уже существующих."""
 
 
@@ -121,6 +126,41 @@ def merge(pb: dict, res: dict, today: date, now: datetime) -> dict[str, list[str
     notes = [str(x).replace("*", "")[:180] for x in (res.get("trend_notes") or []) if str(x).strip()][:6]
     if notes:
         pb["trend_notes"] = notes
+    added["events"] = merge_events(pb, res.get("events") or [], today)
+    return added
+
+
+MAX_EVENTS = 10
+
+
+def merge_events(pb: dict, events: list, today: date) -> list[str]:
+    """Инфоповоды с датой — в календарь (pb["events"]). Прошедшие удаляются."""
+    kept = []
+    for ev in pb.get("events", []):
+        try:
+            if date.fromisoformat(ev["date"]) >= today - timedelta(days=2):
+                kept.append(ev)
+        except (KeyError, ValueError, TypeError):
+            continue
+    titles = {e["title"].lower() for e in kept}
+    added = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        title = " ".join(str(ev.get("title") or "").replace("*", "").split())[:60]
+        try:
+            day = date.fromisoformat(str(ev.get("date"))[:10])
+        except ValueError:
+            continue
+        scenes = [str(x)[:120] for x in (ev.get("scenes") or []) if str(x).strip()][:5]
+        if not title or title.lower() in titles or len(scenes) < 2 or not (today <= day <= today + timedelta(days=30)):
+            continue
+        kept.append({"id": f"ev_{day:%m%d}_{_slug(title) or len(kept)}", "title": title, "date": day.isoformat(),
+                     "scenes": scenes, "lead": 3, "after": 1, "weight": 2, "max_reels": 1,
+                     "note": str(ev.get("why") or "")[:160]})
+        titles.add(title.lower())
+        added.append(f"{day:%d.%m} — {title}")
+    pb["events"] = sorted(kept, key=lambda e: e["date"])[-MAX_EVENTS:]
     return added
 
 
@@ -271,6 +311,9 @@ def run(cfg: Config, db: DB, ai: AI, today: date | None = None, now: datetime | 
         parts.append("Новые хуки (пойдут в эксперименты):\n" + "\n".join(f"  + {h}" for h in added["hooks"]))
     if added["themes"]:
         parts.append("Новые темы: " + ", ".join(added["themes"]))
+    if added.get("events"):
+        parts.append("Инфоповоды в календарь (под них будут новые кадры):\n"
+                     + "\n".join(f"  + {e}" for e in added["events"]))
     if pb.get("trend_notes"):
         parts.append("Приёмы для сценариста:\n" + "\n".join(f"  — {n}" for n in pb["trend_notes"]))
     if removed:

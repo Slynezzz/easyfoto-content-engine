@@ -60,7 +60,13 @@ class Config:
     trends_without_search: bool = field(default_factory=lambda: _env("TRENDS_WITHOUT_SEARCH", "1") not in ("0", "false", "no"))
 
     # --- откуда брать фото для роликов: library (готовые), generate (новые), mixed
-    image_source: str = field(default_factory=lambda: _env("IMAGE_SOURCE", "library"))
+    image_source: str = field(default_factory=lambda: _env("IMAGE_SOURCE", "mixed"))
+    # В режиме mixed: доля роликов с новыми кадрами (остальные — из библиотеки)
+    generate_share: float = field(default_factory=lambda: _float("GENERATE_SHARE", 0.7))
+    # Сколько новых кадров генерировать на ролик (каждый кадр тратит токены посредника)
+    generate_photos: int = field(default_factory=lambda: _int("GENERATE_PHOTOS", 4))
+    # Сколько роликов в день отдавать под праздники и инфоповоды, когда они есть
+    occasions_per_day: int = field(default_factory=lambda: _int("OCCASIONS_PER_DAY", 1))
     persona_gender: str = field(default_factory=lambda: _env("PERSONA_GENDER", "male"))  # male | female
     bot_username: str = field(default_factory=lambda: _env("BOT_USERNAME", "Easyfotobot"))
 
