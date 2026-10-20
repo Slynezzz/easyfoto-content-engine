@@ -25,6 +25,7 @@ from .llm import AI
 from .producer import produce
 from .telegram import TelegramAPI
 from .vk import VK, VKError
+from .youtube import YouTube, YTError
 
 log = logging.getLogger("engine")
 
@@ -38,6 +39,7 @@ class Engine:
                  rng: random.Random | None = None):
         self.cfg, self.db, self.ai, self.ig, self.bot = cfg, db, ai, ig, bot
         self.vk = VK(cfg, db)
+        self.yt = YouTube(cfg, db)
         self.tz = ZoneInfo(cfg.timezone)
         self._now = now or (lambda: datetime.now(self.tz))
         self.rng = rng or random.Random()
@@ -137,13 +139,22 @@ class Engine:
         return f"🚀 Ролик #{post_id} опубликован: {link}"
 
     # ------------------------------------------------------- другие площадки
+    PLATFORM_RU = {"vk": "📘 VK", "vk_manual": "📘 VK (пришлю файл и текст)", "yt": "▶️ YouTube Shorts"}
+
+    def _publishers(self) -> dict:
+        """Площадки с автоматической публикацией: имя → (клиент, класс ошибки)."""
+        return {"vk": (self.vk, VKError), "yt": (self.yt, YTError)}
+
     def on_approved(self, post_id: int, now: bool) -> str:
-        """Ставит одобренный ролик в очередь VK (и будущих площадок). Возвращает строку для владельца."""
+        """Ставит одобренный ролик в очередь VK и YouTube. Возвращает строку для владельца."""
+        platforms = []
         if self.vk.can_autopublish():
-            platform, label = "vk", "📘 VK"
+            platforms.append("vk")
         elif self.cfg.vk_manual:
-            platform, label = "vk_manual", "📘 VK (пришлю файл и текст)"
-        else:
+            platforms.append("vk_manual")
+        if self.yt.ready():
+            platforms.append("yt")
+        if not platforms:
             return ""
         post = self.db.post(post_id)
         if now:
@@ -154,9 +165,20 @@ class Engine:
             when = self.next_free_slot()
             self.db.update_post(post_id, scheduled_for=when.strftime(SLOT_FMT))
         due = when.astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
-        if not self.db.queue_crosspost(post_id, platform, due):
+        added = [p for p in platforms if self.db.queue_crosspost(post_id, p, due)]
+        if not added:
             return ""
-        return f"{label}: сейчас" if now or when <= self.now() else f"{label}: {when:%d.%m %H:%M}"
+        at = "сейчас" if now or when <= self.now() else f"{when:%d.%m %H:%M}"
+        return "\n".join(f"{self.PLATFORM_RU[p]}: {at}" for p in added)
+
+    def yt_callback(self, params: dict) -> str:
+        try:
+            text = self.yt.finish_login(params)
+        except YTError as e:
+            self.say(f"⚠️ YouTube не подключился: {e}")
+            return f"<h3>YouTube не подключился</h3><p>{e}</p><p>Набери /youtube в админ-боте и попробуй снова.</p>"
+        self.say(text)
+        return "<h3>✅ YouTube подключён</h3><p>Можно закрыть страницу и вернуться в админ-бот.</p>"
 
     def vk_callback(self, params: dict) -> str:
         """Возврат из VK ID после входа: обмениваем код на ключи, пишем итог в админ-бот."""
@@ -168,18 +190,25 @@ class Engine:
         self.say(text)
         return "<h3>✅ VK подключён</h3><p>Можно закрыть страницу и вернуться в админ-бот.</p>"
 
-    def vk_retry(self, post_id: int) -> str:
+    def retry_crosspost(self, platform: str, post_id: int) -> str:
         due = self.now().astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
-        if not self.db.claim_crosspost(post_id, "vk", "failed", "queued"):
-            return "Этот ролик уже не ждёт повтора в VK."
-        self.db.update_crosspost(post_id, "vk", due_at=due)
-        return f"Повторю публикацию #{post_id} в VK в ближайшую минуту."
+        if not self.db.claim_crosspost(post_id, platform, "failed", "queued"):
+            return "Этот ролик уже не ждёт повтора."
+        self.db.update_crosspost(post_id, platform, due_at=due)
+        return f"Повторю публикацию #{post_id} ({self.PLATFORM_RU.get(platform, platform)}) в ближайшую минуту."
+
+    def vk_retry(self, post_id: int) -> str:
+        return self.retry_crosspost("vk", post_id)
+
+    def yt_retry(self, post_id: int) -> str:
+        return self.retry_crosspost("yt", post_id)
 
     def job_crosspost(self) -> int:
-        """Публикует в VK ролики, чьё время наступило. Не больше одного за раз."""
+        """Публикует на других площадках ролики, чьё время наступило. По одному на площадку за раз."""
         if self.db.get("paused") == "1":
             return 0
         now = self.now().astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+        done = 0
         manual = [r for r in self.db.crossposts("queued", "vk_manual") if r["due_at"] <= now]
         if manual and self.bot:
             pid = manual[0]["post_id"]
@@ -187,26 +216,44 @@ class Engine:
                 _, text = self.vk.text_for(self.db.post(pid))
                 if not self.bot.send_vk_package(pid, text):
                     self.db.update_crosspost(pid, "vk_manual", status="queued")  # попробуем через минуту
-            return 1
-        if not self.vk.ready():
+                done += 1
+        for platform, (client, err_cls) in self._publishers().items():
+            if not client.ready():
+                continue
+            due = [r for r in self.db.crossposts("queued", platform) if r["due_at"] <= now]
+            if not due:
+                continue
+            pid = due[0]["post_id"]
+            if not self.db.claim_crosspost(pid, platform, "queued", "publishing"):
+                continue
+            label = self.PLATFORM_RU[platform]
+            try:
+                url = client.publish(pid)
+            except Exception as e:  # noqa: BLE001 — любая ошибка не должна оставить пост «в публикации»
+                msg = str(e) if isinstance(e, err_cls) else f"{type(e).__name__}: {e}"
+                self.db.update_crosspost(pid, platform, status="failed", error=msg[:500])
+                self.say(f"⚠️ {label}: ролик #{pid} не опубликован: {msg}",
+                         {"inline_keyboard": [[{"text": "🔁 Повторить",
+                                                "callback_data": f"{platform}retry:{pid}"}]]})
+                continue
+            self.db.update_crosspost(pid, platform, status="published")
+            self.say(f"{label}: ролик #{pid} опубликован: {url}")
+            done += 1
+        return done
+
+    def job_yt_metrics(self) -> int:
+        """Статистика Shorts: просмотры, лайки, комментарии — для аналитика."""
+        if not self.yt.ready():
             return 0
-        due = [r for r in self.db.crossposts("queued", "vk") if r["due_at"] <= now]
-        if not due:
+        rows = {r["external_id"]: r["post_id"] for r in self.db.crossposts("published", "yt") if r["external_id"]}
+        if not rows:
             return 0
-        pid = due[0]["post_id"]
-        if not self.db.claim_crosspost(pid, "vk", "queued", "publishing"):
-            return 0
-        try:
-            url = self.vk.publish(pid)
-        except Exception as e:  # noqa: BLE001 — любая ошибка не должна оставить пост «в публикации»
-            msg = str(e) if isinstance(e, VKError) else f"{type(e).__name__}: {e}"
-            self.db.update_crosspost(pid, "vk", status="failed", error=msg[:500])
-            self.say(f"⚠️ VK: ролик #{pid} не опубликован: {msg}",
-                     {"inline_keyboard": [[{"text": "🔁 Повторить в VK", "callback_data": f"vkretry:{pid}"}]]})
-            return 0
-        self.db.update_crosspost(pid, "vk", status="published")
-        self.say(f"📘 VK: ролик #{pid} опубликован: {url}")
-        return 1
+        stats = self.yt.stats(list(rows))
+        ts = self.now().astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+        for vid, s in stats.items():
+            self.db.x("INSERT INTO platform_metrics(post_id, platform, collected_at, views, likes, comments) "
+                      "VALUES (?,?,?,?,?,?)", (rows[vid], "yt", ts, s["viewCount"], s["likeCount"], s["commentCount"]))
+        return len(stats)
 
     def job_vk_token(self) -> bool:
         warn = self.vk.token_warning()
@@ -245,9 +292,11 @@ class Engine:
             # если видео уже загружено (external_id есть), повтор только допишет пост на стене
             self.db.update_crosspost(r["post_id"], r["platform"], status="failed",
                                      error="сервис перезапустился во время публикации")
-            self.say(f"⚠️ VK: ролик #{r['post_id']} публиковался в момент перезапуска. Нажми «Повторить» — "
-                     "видео второй раз не загрузится.",
-                     {"inline_keyboard": [[{"text": "🔁 Повторить в VK", "callback_data": f"vkretry:{r['post_id']}"}]]})
+            label = self.PLATFORM_RU.get(r["platform"], r["platform"])
+            self.say(f"⚠️ {label}: ролик #{r['post_id']} публиковался в момент перезапуска. Проверь площадку: "
+                     "если ролика там нет — нажми «Повторить».",
+                     {"inline_keyboard": [[{"text": "🔁 Повторить",
+                                            "callback_data": f"{r['platform']}retry:{r['post_id']}"}]]})
             n += 1
         return n
 
@@ -423,6 +472,7 @@ class Engine:
             ("publish", timedelta(seconds=30), self.job_publish),
             ("crosspost", timedelta(minutes=1), self.job_crosspost),
             ("vk_token", timedelta(hours=6), self.job_vk_token),
+            ("yt_metrics", timedelta(hours=12), self.job_yt_metrics),
             ("balances", timedelta(hours=24), self.job_balances),
             ("metrics", timedelta(hours=6), self.job_metrics),
             ("scout", timedelta(hours=1), self.job_scout),
@@ -474,6 +524,9 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
             vk_login=engine.vk.start_login,
             vk_retry=engine.vk_retry,
             vk_status=engine.vk.status,
+            yt_status=engine.yt.status,
+            yt_login=engine.yt.start_login,
+            yt_retry=engine.yt_retry,
             balances_text=lambda: balances.report(cfg, db),
         ))
         engine.bot = bot
@@ -486,7 +539,8 @@ def main() -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     cfg = Config()
     engine, bot = build(cfg)
-    server.start(cfg.media_dir, cfg.port, routes={"/vk/callback": engine.vk_callback})
+    server.start(cfg.media_dir, cfg.port, routes={"/vk/callback": engine.vk_callback,
+                                                  "/yt/callback": engine.yt_callback})
     log.info("старт: слоты %s, источник фото %s, Instagram %s", cfg.publish_hours_list[: cfg.reels_per_day],
              cfg.image_source, "подключён" if engine.ig.ready() else "не подключён")
     if not bot:

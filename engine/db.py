@@ -64,6 +64,13 @@ CREATE TABLE IF NOT EXISTS playbook_history (
     note TEXT
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- статистика роликов на других площадках (YouTube, VK)
+CREATE TABLE IF NOT EXISTS platform_metrics (
+    post_id INTEGER NOT NULL REFERENCES posts(id),
+    platform TEXT NOT NULL,
+    collected_at TEXT NOT NULL,
+    views INTEGER, likes INTEGER, comments INTEGER
+);
 -- публикации ролика на других площадках (VK и т.д.), независимо от Instagram
 CREATE TABLE IF NOT EXISTS crossposts (
     post_id INTEGER NOT NULL REFERENCES posts(id),

@@ -316,5 +316,16 @@ class AdminBotTests(unittest.TestCase):
         self.assertIn(("markup", {"label": "✅ Выложено в VK"}), self.api.sent)
 
 
+    def test_youtube_help_and_login(self):
+        self.cfg.yt_client_id = ""
+        self.bot.handle(msg("/youtube"))
+        self.assertIn("YT_CLIENT_ID", self.api.texts()[-1])
+        self.assertIn("/yt/callback", self.api.texts()[-1])
+        self.cfg.yt_client_id, self.cfg.yt_client_secret = "cid", "sec"
+        self.bot.s.yt_login = lambda: "https://accounts.google.com/o/oauth2/v2/auth?x=1"
+        self.bot.handle(msg("/youtube"))
+        self.assertIn("accounts.google.com", self.api.texts()[-1])
+
+
 if __name__ == "__main__":
     unittest.main()

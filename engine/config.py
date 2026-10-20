@@ -93,6 +93,11 @@ class Config:
     vk_link_target: str = field(default_factory=lambda: _env("VK_LINK_TARGET", "max"))
     max_bot_url: str = field(default_factory=lambda: _env("MAX_BOT_URL", "https://max.ru/id230406400050_bot").rstrip("/"))
 
+    # --- YouTube Shorts: OAuth-клиент Google (тип Web application), вход — /youtube
+    yt_client_id: str = field(default_factory=lambda: _env("YT_CLIENT_ID"))
+    yt_client_secret: str = field(default_factory=lambda: _env("YT_CLIENT_SECRET"))
+    yt_privacy: str = field(default_factory=lambda: _env("YT_PRIVACY", "public"))  # public | unlisted | private
+
     # --- предупреждения о балансах: порог в долларах для посредников
     balance_warn_usd: float = field(default_factory=lambda: _float("BALANCE_WARN_USD", 3.0))
 

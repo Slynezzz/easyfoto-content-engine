@@ -36,6 +36,7 @@ HELP = """Команды:
 /brief — что система знает о продукте и аудитории (можно заменить своим)
 /trends — обновить тренды прямо сейчас
 /stats — статистика роликов
+/youtube — подключить YouTube Shorts
 /vk — подключить VK Клипы (ролики будут выходить и в сообщество VK)
 /balance — балансы и лимиты всех платных сервисов
 /funnel — сколько пришло в бот по ссылкам, сделали фото и купили (/funnel 7 — за неделю)
@@ -76,6 +77,9 @@ class Services:
     vk_retry: Callable[[int], str] | None = None
     balances_text: Callable[[], str] = lambda: "Проверка балансов недоступна"
     vk_status: Callable[[], str] = lambda: "VK: не подключён"
+    yt_status: Callable[[], str] = lambda: "YouTube: не подключён"
+    yt_login: Callable[[], str] | None = None
+    yt_retry: Callable[[int], str] | None = None
 
 
 def approval_keyboard(post_id: int) -> dict:
@@ -662,6 +666,8 @@ class AdminBot:
                 self.run_bg(self._music_test)
         elif cmd == "/vk":
             self.say(self.vk_help())
+        elif cmd in ("/youtube", "/yt"):
+            self.say(self.yt_help())
         elif cmd == "/balance":
             self.say("Проверяю балансы сервисов…")
             self.run_bg(lambda: self.say(self.s.balances_text()))
@@ -680,6 +686,32 @@ class AdminBot:
             self.say(f"Новых файлов: {sum(added.values())}. Разметка библиотеки идёт в фоне.")
         else:
             self.say("Не знаю такой команды.\n\n" + HELP)
+
+    def yt_help(self) -> str:
+        from urllib.parse import urlparse
+        host = urlparse(self.cfg.public_base_url).netloc or "адрес-движка.up.railway.app"
+        setup = ("Один раз в Google Cloud (console.cloud.google.com, твой проект):\n"
+                 "1. «APIs & Services → Library» → YouTube Data API v3 → Enable.\n"
+                 "2. «OAuth consent screen» (Google Auth Platform → Branding/Audience): тип External, "
+                 "заполни название и почту, затем Audience → «Publish app» (статус In production). "
+                 "Иначе Google отзывает вход через 7 дней.\n"
+                 "3. «Credentials → Create credentials → OAuth client ID», тип «Web application», "
+                 f"Authorized redirect URI: https://{host}/yt/callback\n"
+                 "4. Client ID и Client secret — в Railway: YT_CLIENT_ID и YT_CLIENT_SECRET, затем Deploy и снова /youtube.")
+        if not (self.cfg.yt_client_id and self.cfg.yt_client_secret):
+            return "Чтобы ролики выходили в YouTube Shorts:\n" + setup
+        if not self.s.yt_login:
+            return "Подключение YouTube недоступно."
+        try:
+            link = self.s.yt_login()
+        except Exception as e:  # noqa: BLE001
+            return f"⚠️ {e}"
+        return ("Вход в YouTube:\n"
+                f"1. Открой ссылку (одноразовая): {link}\n"
+                "2. Выбери аккаунт с каналом. Google предупредит «приложение не проверено» — это твоё же "
+                "приложение: «Дополнительно → Перейти…», отметь все галочки и разреши.\n"
+                "3. Откроется страница «✅ YouTube подключён», а сюда придёт отчёт.\n\n"
+                "Если Google пишет redirect_uri_mismatch — проверь адрес возврата:\n" + setup)
 
     def vk_help(self) -> str:
         from urllib.parse import urlparse
@@ -722,6 +754,7 @@ class AdminBot:
             f"Автопубликация: {'на паузе' if self.paused else 'включена'}",
             f"Instagram: {'подключён' if self.s.instagram_ready() else 'не подключён — публикуешь вручную'}",
             self.s.vk_status(),
+            self.s.yt_status(),
             f"Тексты роликов пишет: {self.cfg.copy_model or 'основная модель'}"
             + (f" (⚠️ {self.db.get('last_copy_error')[:150]})" if self.db.get("last_copy_error") else ""),
             f"Источник фото: {self.cfg.image_source}; сгенерировано сегодня: "
@@ -768,10 +801,11 @@ class AdminBot:
                 self.api.answer_callback(cq["id"], "Уже отмечено")
             return
 
-        if action == "vkretry":
+        if action in ("vkretry", "ytretry"):
             self.api.answer_callback(cq["id"])
-            if self.s.vk_retry:
-                self.say(self.s.vk_retry(post_id))
+            fn = self.s.vk_retry if action == "vkretry" else self.s.yt_retry
+            if fn:
+                self.say(fn(post_id))
             return
 
         if action in ("ok", "now"):
