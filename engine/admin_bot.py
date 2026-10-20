@@ -38,6 +38,7 @@ HELP = """Команды:
 /analyze — пересчитать плейбук по статистике
 /pause и /resume — остановить или включить автопубликацию
 /scan — разобрать новые фото
+/photos — хранилище фото: посмотреть, удалить, перенести
 /move 5 до — перенести 5 последних фото в селфи «до» (или «реф», «библиотека»)
 
 Фото: просто пришли их сюда (лучше файлом, без сжатия).
@@ -294,6 +295,106 @@ class AdminBot:
         for i in range(0, len(text), 3800):
             self.say(text[i:i + 3800])
 
+    # ------------------------------------------------------ photo manager
+    PHOTO_KINDS = {"library": "Библиотека", "before": "Селфи «до»", "ref": "Референсы",
+                   "generated": "Сгенерированные"}
+    KIND_DIR = {"library": "library", "before": "before", "ref": "refs"}
+    PAGE = 10
+
+    def photos_menu(self) -> None:
+        rows = [[{"text": f"{label} ({len(self.db.assets(kind))})", "callback_data": f"pf:{kind}:0"}]
+                for kind, label in self.PHOTO_KINDS.items()]
+        self.say("Хранилище фото. Что где используется:\n"
+                 "• Библиотека — готовые кадры, попадают в ролики.\n"
+                 "• Селфи «до» — показываются в роликах «было → стало» и служат образцом лица.\n"
+                 "• Референсы — только образец лица для генерации, в ролики не попадают никогда.\n"
+                 "• Сгенерированные — новые кадры от системы, тоже идут в ролики.\n\n"
+                 "Открой папку, выбери фото по номеру — его можно удалить или перенести.",
+                 {"inline_keyboard": rows})
+
+    def _thumb_file(self, path: str, i: int) -> Path:
+        out = self.cfg.data_dir / "work" / f"thumb_{uuid.uuid4().hex[:6]}_{i}.jpg"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(images._thumb(path, 640))
+        return out
+
+    def show_photos(self, kind: str, offset: int) -> None:
+        rows = self.db.q("SELECT * FROM assets WHERE kind=? ORDER BY id LIMIT ? OFFSET ?",
+                         (kind, self.PAGE, offset))
+        total = len(self.db.assets(kind))
+        if not rows:
+            self.say(f"В папке «{self.PHOTO_KINDS.get(kind, kind)}» пусто.")
+            return
+        thumbs, captions = [], []
+        try:
+            for i, r in enumerate(rows):
+                try:
+                    thumbs.append(self._thumb_file(r["path"], i))
+                except OSError:
+                    continue
+                captions.append(f"{offset + len(thumbs)}. {r['title'] or ''}".strip())
+            if thumbs:
+                self.api.send_media_group(self.admin, thumbs, captions)
+        finally:
+            for t in thumbs:
+                t.unlink(missing_ok=True)
+        buttons = [{"text": str(offset + i + 1), "callback_data": f"pa:{r['id']}"} for i, r in enumerate(rows)]
+        keyboard = [buttons[:5], buttons[5:]] if len(buttons) > 5 else [buttons]
+        if offset + self.PAGE < total:
+            keyboard.append([{"text": "Дальше ▶", "callback_data": f"pf:{kind}:{offset + self.PAGE}"}])
+        self.say(f"{self.PHOTO_KINDS.get(kind, kind)}: {offset + 1}–{offset + len(rows)} из {total}. "
+                 "Выбери номер фото:", {"inline_keyboard": [k for k in keyboard if k]})
+
+    def photo_actions(self, asset_id: int) -> None:
+        row = self.db.one("SELECT * FROM assets WHERE id=?", (asset_id,))
+        if not row:
+            self.say("Этого фото уже нет.")
+            return
+        moves = [{"text": f"→ {label}", "callback_data": f"pm:{asset_id}:{kind}"}
+                 for kind, label in self.PHOTO_KINDS.items() if kind in self.KIND_DIR and kind != row["kind"]]
+        self.say(f"Фото «{row['title'] or 'без названия'}» — сейчас в папке «{self.PHOTO_KINDS.get(row['kind'])}», "
+                 f"использовалось в роликах: {row['used_count']}.",
+                 {"inline_keyboard": [[{"text": "🗑 Удалить", "callback_data": f"pd:{asset_id}"}], moves]})
+
+    def delete_photo(self, asset_id: int) -> bool:
+        """Фото уходит в корзину на томе (DATA_DIR/trash), а не стирается насовсем."""
+        row = self.db.one("SELECT * FROM assets WHERE id=?", (asset_id,))
+        if not row:
+            return False
+        src = Path(row["path"])
+        if src.exists():
+            trash = self.cfg.data_dir / "trash"
+            trash.mkdir(parents=True, exist_ok=True)
+            src.replace(trash / f"{row['id']}_{src.name}")
+        self.db.x("DELETE FROM assets WHERE id=?", (asset_id,))
+        return True
+
+    def on_photo_callback(self, cq: dict, data: str) -> None:
+        if cq["from"]["id"] != self.admin:
+            self.api.answer_callback(cq["id"])
+            return
+        parts = data.split(":")
+        self.api.answer_callback(cq["id"])
+        try:
+            if parts[0] == "pf":
+                self.run_bg(lambda: self.show_photos(parts[1], int(parts[2])))
+            elif parts[0] == "pa":
+                self.photo_actions(int(parts[1]))
+            elif parts[0] == "pd":
+                ok = self.delete_photo(int(parts[1]))
+                self.say(("Удалил (лежит в корзине на томе). " if ok else "Этого фото уже нет. ")
+                         + self._counts_text())
+            elif parts[0] == "pm":
+                row = self.db.one("SELECT * FROM assets WHERE id=?", (int(parts[1]),))
+                target = self.KIND_DIR.get(parts[2])
+                if not row or not target:
+                    self.say("Этого фото уже нет.")
+                    return
+                self.move_asset(row, target)
+                self.say("Перенёс. " + self._counts_text())
+        except (ValueError, IndexError):
+            self.say("Не понял кнопку — открой /photos заново.")
+
     # ------------------------------------------------------- moving files
     @staticmethod
     def parse_kind(word: str) -> str | None:
@@ -323,7 +424,7 @@ class AdminBot:
 
     def _counts_text(self) -> str:
         return (f"Библиотека: {len(self.db.assets('library'))}, селфи «до»: {len(self.db.assets('before'))}, "
-                f"референсы: {len(self.db.assets('ref'))}.")
+                f"референсы: {len(self.db.assets('ref'))}, сгенерированные: {len(self.db.assets('generated'))}.")
 
     def on_reply(self, text: str, replied: dict) -> None:
         kind = self.parse_kind(text)
@@ -409,6 +510,8 @@ class AdminBot:
         elif cmd == "/brief_reset":
             brief.reset(self.cfg)
             self.say("Вернул стандартный бриф.")
+        elif cmd == "/photos":
+            self.photos_menu()
         elif cmd == "/move":
             self.move_last(args)
         elif cmd == "/scan":
@@ -447,6 +550,9 @@ class AdminBot:
     def on_callback(self, cq: dict) -> None:
         data = cq.get("data") or ""
         msg = cq.get("message") or {}
+        if data.split(":", 1)[0] in ("pf", "pa", "pd", "pm"):
+            self.on_photo_callback(cq, data)
+            return
         action, _, raw_id = data.partition(":")
         if action == "noop" or not raw_id.isdigit():
             self.api.answer_callback(cq["id"])
