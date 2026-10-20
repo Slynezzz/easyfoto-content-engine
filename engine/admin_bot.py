@@ -187,6 +187,24 @@ class AdminBot:
                 log.warning("full caption #%s: %s", post_id, e)
         return True
 
+    def send_vk_package(self, post_id: int, text: str) -> bool:
+        """Файл ролика и текст для ручной публикации в VK Клипы."""
+        post = self.db.post(post_id)
+        if not post or not post["video_path"] or not Path(post["video_path"]).exists():
+            self.say(f"⚠️ VK: файл ролика #{post_id} уже удалён — выложить не получится.")
+            return True
+        try:
+            self.api.send_document(self.admin, post["video_path"],
+                                   f"📘 Пора в VK Клипы: ролик #{post_id}. Сохрани файл и выложи клип "
+                                   "в сообществе (в VK-редакторе можно заменить звук на трек из VK Музыки). "
+                                   "Текст — следующим сообщением.",
+                                   {"inline_keyboard": [[{"text": "✅ Выложил в VK", "callback_data": f"vkdone:{post_id}"}]]})
+        except Exception as e:  # noqa: BLE001
+            log.warning("vk package #%s: %s", post_id, e)
+            return False
+        self.say(text)
+        return True
+
     def push_rendered(self) -> int:
         return sum(self.send_for_approval(p["id"]) for p in self.db.posts("rendered"))
 
@@ -740,6 +758,14 @@ class AdminBot:
             self.api.answer_callback(cq["id"])
             if post:
                 self.say(post["caption"] or "(пусто)")
+            return
+
+        if action == "vkdone":
+            if self.db.claim_crosspost(post_id, "vk_manual", "sent", "published"):
+                self.api.answer_callback(cq["id"], "Отмечено")
+                mark("✅ Выложено в VK")
+            else:
+                self.api.answer_callback(cq["id"], "Уже отмечено")
             return
 
         if action == "vkretry":

@@ -307,5 +307,14 @@ class AdminBotTests(unittest.TestCase):
         self.assertIn("📘 VK: по расписанию", self.api.texts())
 
 
+    def test_vk_done_button(self):
+        pid = self._post()
+        self.db.queue_crosspost(pid, "vk_manual", "2026-01-01T00:00:00+00:00")
+        self.db.claim_crosspost(pid, "vk_manual", "queued", "sent")
+        self.bot.handle(cb(f"vkdone:{pid}"))
+        self.assertEqual(self.db.crosspost(pid, "vk_manual")["status"], "published")
+        self.assertIn(("markup", {"label": "✅ Выложено в VK"}), self.api.sent)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -85,6 +85,9 @@ class Config:
     vk_client_secret: str = field(default_factory=lambda: _env("VK_CLIENT_SECRET"))  # «Защищённый ключ», если VK требует
     vk_scope: str = field(default_factory=lambda: _env("VK_SCOPE", "video wall groups"))
     vk_id_host: str = field(default_factory=lambda: _env("VK_ID_HOST", "https://id.vk.ru").rstrip("/"))
+    # VK больше не выдаёт новым приложениям доступ к загрузке видео. Без него — полуавтомат:
+    # в час публикации бот присылает файл ролика и готовый текст для VK Клипов.
+    vk_manual: bool = field(default_factory=lambda: _env("VK_MANUAL", "1") not in ("0", "false", "no"))
     vk_wallpost: bool = field(default_factory=lambda: _env("VK_WALLPOST", "1") not in ("0", "false", "no"))
     # куда ведёт ссылка в VK: max (бот в MAX) или tg (бот в Telegram)
     vk_link_target: str = field(default_factory=lambda: _env("VK_LINK_TARGET", "max"))

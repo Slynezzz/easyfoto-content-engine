@@ -139,7 +139,11 @@ class Engine:
     # ------------------------------------------------------- другие площадки
     def on_approved(self, post_id: int, now: bool) -> str:
         """Ставит одобренный ролик в очередь VK (и будущих площадок). Возвращает строку для владельца."""
-        if not self.vk.ready():
+        if self.vk.can_autopublish():
+            platform, label = "vk", "📘 VK"
+        elif self.cfg.vk_manual:
+            platform, label = "vk_manual", "📘 VK (пришлю файл и текст)"
+        else:
             return ""
         post = self.db.post(post_id)
         if now:
@@ -150,9 +154,9 @@ class Engine:
             when = self.next_free_slot()
             self.db.update_post(post_id, scheduled_for=when.strftime(SLOT_FMT))
         due = when.astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
-        if not self.db.queue_crosspost(post_id, "vk", due):
+        if not self.db.queue_crosspost(post_id, platform, due):
             return ""
-        return "📘 VK: сейчас" if now or when <= self.now() else f"📘 VK: {when:%d.%m %H:%M}"
+        return f"{label}: сейчас" if now or when <= self.now() else f"{label}: {when:%d.%m %H:%M}"
 
     def vk_callback(self, params: dict) -> str:
         """Возврат из VK ID после входа: обмениваем код на ключи, пишем итог в админ-бот."""
@@ -173,9 +177,19 @@ class Engine:
 
     def job_crosspost(self) -> int:
         """Публикует в VK ролики, чьё время наступило. Не больше одного за раз."""
-        if self.db.get("paused") == "1" or not self.vk.ready():
+        if self.db.get("paused") == "1":
             return 0
         now = self.now().astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+        manual = [r for r in self.db.crossposts("queued", "vk_manual") if r["due_at"] <= now]
+        if manual and self.bot:
+            pid = manual[0]["post_id"]
+            if self.db.claim_crosspost(pid, "vk_manual", "queued", "sent"):
+                _, text = self.vk.text_for(self.db.post(pid))
+                if not self.bot.send_vk_package(pid, text):
+                    self.db.update_crosspost(pid, "vk_manual", status="queued")  # попробуем через минуту
+            return 1
+        if not self.vk.ready():
+            return 0
         due = [r for r in self.db.crossposts("queued", "vk") if r["due_at"] <= now]
         if not due:
             return 0

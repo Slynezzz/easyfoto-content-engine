@@ -116,6 +116,15 @@ class VK:
         has_key = self.cfg.vk_access_token or self.db.get("vk_token") or self.db.get("vk_refresh_token")
         return bool(has_key and self.cfg.vk_group_id)
 
+    def can_autopublish(self) -> bool:
+        """Есть вход с правами на видео и стену (новым приложениям VK их сейчас не выдаёт)."""
+        if not self.ready():
+            return False
+        if self.cfg.vk_access_token:
+            return True
+        granted = self.db.get("vk_scope_granted") or ""
+        return granted == "legacy" or {"video", "wall"} <= set(granted.split())
+
     def _exp(self, key: str) -> datetime | None:
         raw = self.db.get(key) or ""
         return datetime.fromisoformat(raw) if raw else None
@@ -176,6 +185,7 @@ class VK:
                          "device_id": params["device_id"], "redirect_uri": redirect_uri(self.cfg), "state": state})
         self.db.set("vk_pkce_state", "")  # ссылка одноразовая
         self._store(d, params["device_id"])
+        self.db.set("vk_scope_granted", str(d.get("scope") or ""))
         return self._connected_report(d["access_token"], str(d.get("user_id") or ""), "VK ID",
                                       granted=str(d.get("scope") or ""))
 
@@ -195,6 +205,7 @@ class VK:
         self._call("users.get", token=token)
         self.db.set("vk_token", token)
         self.db.set("vk_refresh_token", "")
+        self.db.set("vk_scope_granted", "legacy")
         self.db.set("vk_user_id", user_id)
         until = (datetime.now(timezone.utc) + timedelta(seconds=expires)).isoformat(timespec="seconds") \
             if expires else ""
@@ -316,6 +327,8 @@ class VK:
         return ""
 
     def status(self) -> str:
+        if not self.can_autopublish() and self.cfg.vk_manual:
+            return "VK: полуавтомат — в час публикации пришлю файл и текст для VK Клипов"
         if not self.cfg.vk_app_id and not self.cfg.vk_access_token:
             return "VK: не подключён (нужны VK_APP_ID и VK_GROUP_ID, затем /vk)"
         if not self.ready() and not (self.db.get("vk_token") or self.db.get("vk_refresh_token")):

@@ -60,6 +60,10 @@ class FakeBot:
         self.brief_offers = getattr(self, "brief_offers", 0) + 1
         return 0
 
+    def send_vk_package(self, pid, text):
+        self.vk_packages = getattr(self, "vk_packages", []) + [(pid, text)]
+        return True
+
     def push_rendered(self):
         return 0
 

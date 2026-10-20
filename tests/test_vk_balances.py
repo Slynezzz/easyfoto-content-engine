@@ -120,6 +120,7 @@ class VKTests(unittest.TestCase):
         self.assertIn("VK ID", self.engine.vk.status())
 
     def test_refresh_failure_is_reported(self):
+        self.cfg.vk_manual = False
         self.db.set("vk_refresh_token", "R")
         self.db.set("vk_token_expires", "2000-01-01T00:00:00+00:00")
         with mock.patch("engine.vk.requests.post", return_value=R({"error": "invalid_grant"})):
@@ -163,8 +164,26 @@ class VKTests(unittest.TestCase):
         self.assertEqual(self.db.crosspost(self.pid, "vk")["status"], "published")
 
     def test_not_connected_does_nothing(self):
+        self.cfg.vk_manual = False
         self.assertEqual(self.engine.on_approved(self.pid, now=True), "")
         self.assertIn("нужен вход — /vk", self.engine.vk.status())
+
+    def test_manual_mode_without_video_rights(self):
+        # VK ID выдал только личные данные — автопубликация невозможна, работает полуавтомат
+        self.db.set("vk_refresh_token", "R")
+        self.db.set("vk_scope_granted", "vkid.personal_info")
+        self.assertFalse(self.engine.vk.can_autopublish())
+        self.assertEqual(self.engine.on_approved(self.pid, now=False), "📘 VK (пришлю файл и текст): 20.10 12:00")
+        self.assertEqual(self.engine.job_crosspost(), 0)
+        self.clock.dt = datetime(2026, 10, 20, 12, 0, tzinfo=TZ)
+        self.assertEqual(self.engine.job_crosspost(), 1)
+        pid, text = self.bot.vk_packages[0]
+        self.assertEqual(pid, self.pid)
+        self.assertIn("https://max.ru/bot?start=utm_vk_clip_p1", text)
+        self.assertEqual(self.db.crosspost(self.pid, "vk_manual")["status"], "sent")
+        self.engine.job_crosspost()
+        self.assertEqual(len(self.bot.vk_packages), 1)   # повторно не шлёт
+        self.assertIn("полуавтомат", self.engine.vk.status())
 
     def test_restart_mid_publish_turns_to_failed(self):
         self.db.queue_crosspost(self.pid, "vk", "2026-10-20T00:00:00+00:00")
