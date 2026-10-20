@@ -114,6 +114,31 @@ WHERE d.first_seen >= NOW() - %s * INTERVAL '1 day'
 """
 
 
+USERS = """
+SELECT u.user_id, COALESCE(u.utm_source, ''), COALESCE(u.utm_medium, ''), COALESCE(u.utm_campaign, ''),
+       u.registered_at,
+       EXISTS (SELECT 1 FROM generated_photos g WHERE g.user_id = u.user_id),
+       EXISTS (SELECT 1 FROM package_purchases p WHERE p.user_id = u.user_id AND p.payment_method IN ('card', 'stars'))
+FROM user_utm u
+WHERE u.registered_at >= NOW() - %s * INTERVAL '1 day'
+"""
+
+
+def users(cfg: Config, days: int = 60) -> list[dict]:
+    """Пользователи с меткой: откуда пришли, когда, сделали ли фото и купили ли (для аналитика)."""
+    conn = _connect(cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(USERS, (days,))
+            rows = cur.fetchall()
+    except Exception as e:  # noqa: BLE001
+        raise FunnelError(f"запрос к базе бота не удался: {str(e).splitlines()[0][:200]}") from None
+    finally:
+        conn.close()
+    return [{"user_id": r[0], "source": r[1], "medium": r[2], "campaign": r[3], "registered_at": r[4],
+             "photo": bool(r[5]), "bought": bool(r[6])} for r in rows]
+
+
 def stats(cfg: Config, days: int = 30) -> dict:
     conn = _connect(cfg)
     try:

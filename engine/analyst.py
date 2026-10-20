@@ -5,6 +5,11 @@
   25% удержание первых секунд (1 − доля пролистываний; сила хука),
   20% вовлечённость (сохранения + репосты + комментарии на просмотр),
   15% среднее время просмотра.
+Если подключена база бота (BOT_DATABASE_URL), в оценку входят и переходы в бот
+(см. attribution): 30% просмотры, 20% удержание, 15% вовлечённость, 10% время
+и 25% — ценность приведённых людей (пришли, сделали фото, купили). Так система
+учится делать ролики, которые приводят покупателей, а не только набирают просмотры.
+Просмотры — сумма Instagram и YouTube Shorts.
 Ранги вместо сырых чисел — чтобы один вирусный ролик не перекосил всё.
 Для каждого формата, хука и темы считается средняя оценка относительно
 средней по аккаунту; веса в плейбуке плавно сдвигаются к ней.
@@ -27,10 +32,12 @@ MIN_POSTS = 6           # меньше — выводы будут шумом
 MIN_PER_ARM = 2         # вариант с одним роликом не трогаем
 MIN_AGE_HOURS = 48      # свежие ролики ещё набирают просмотры
 WEIGHTS = {"plays": 0.40, "hold": 0.25, "engagement": 0.20, "watch": 0.15}
+WEIGHTS_CONV = {"plays": 0.30, "hold": 0.20, "engagement": 0.15, "watch": 0.10, "conversion": 0.25}
 
 INSIGHT_SYSTEM = """Ты аналитик коротких видео. По таблице роликов аккаунта нейрофотографа
 сформулируй 3–6 коротких практических выводов для сценариста: какие хуки, форматы и темы
-работают, что избегать, что попробовать. Только то, что следует из данных; если данных мало —
+работают, что избегать, что попробовать. Главное — какие ролики приводят людей в бот и к покупке
+(колонки «пришли в бот» и «купили»), а не только просмотры. Только то, что следует из данных; если данных мало —
 так и скажи. Каждый вывод — одно предложение до 140 символов.
 Кроме того, предложи 0–3 правки брифа продукта (кому и как продавать), если данные дают
 для этого основание: например, какой сегмент аудитории или какой довод работает лучше.
@@ -66,7 +73,12 @@ def _ranks(values: list[float | None]) -> list[float]:
     return out
 
 
-def score_posts(rows: list[dict]) -> list[dict]:
+def score_posts(rows: list[dict], conv: dict[int, dict] | None = None) -> list[dict]:
+    """conv — переходы в бот по роликам; учитываются, если хоть один ролик кого-то привёл."""
+    use_conv = bool(conv) and any(conv.get(r["post_id"], {}).get("points") for r in rows)
+    w = WEIGHTS_CONV if use_conv else {**WEIGHTS, "conversion": 0.0}
+    points = [conv.get(r["post_id"], {}).get("points", 0.0) if use_conv else None for r in rows]
+    rc = _ranks(points)
     plays = [r.get("plays") for r in rows]
     scale = skip_scale([r.get("skip_rate") for r in rows])
     hold = [None if r.get("skip_rate") is None else 1 - skip_pct(r["skip_rate"], scale) / 100 for r in rows]
@@ -77,9 +89,11 @@ def score_posts(rows: list[dict]) -> list[dict]:
     rp, rh, re_, rw = _ranks(plays), _ranks(hold), _ranks(eng), _ranks(watch)
     scored = []
     for i, r in enumerate(rows):
-        s = (WEIGHTS["plays"] * rp[i] + WEIGHTS["hold"] * rh[i]
-             + WEIGHTS["engagement"] * re_[i] + WEIGHTS["watch"] * rw[i])
-        scored.append({**r, "score": round(s, 4), "engagement_rate": eng[i], "hold": hold[i]})
+        s = (w["plays"] * rp[i] + w["hold"] * rh[i] + w["engagement"] * re_[i] + w["watch"] * rw[i]
+             + w["conversion"] * rc[i])
+        c = (conv or {}).get(r["post_id"], {})
+        scored.append({**r, "score": round(s, 4), "engagement_rate": eng[i], "hold": hold[i],
+                       "regs": c.get("regs"), "bought": c.get("bought")})
     return scored
 
 
@@ -98,11 +112,37 @@ def arm_scores(scored: list[dict]) -> dict[str, dict[str, float]]:
 
 def eligible_rows(db: DB) -> list[dict]:
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=MIN_AGE_HOURS)).isoformat(timespec="seconds")
-    return [dict(r) for r in db.latest_metrics() if (r["published_at"] or "") <= cutoff]
+    yt = {r["post_id"]: r["views"] for r in db.q(
+        "SELECT post_id, views FROM platform_metrics m WHERE platform='yt' AND collected_at = "
+        "(SELECT MAX(collected_at) FROM platform_metrics WHERE post_id = m.post_id AND platform='yt')")}
+    rows = []
+    for r in db.latest_metrics():
+        if (r["published_at"] or "") > cutoff:
+            continue
+        d = dict(r)
+        if yt.get(d["post_id"]):  # просмотры Shorts добавляем к просмотрам Reels
+            d["plays"] = (d.get("plays") or 0) + yt[d["post_id"]]
+        rows.append(d)
+    return rows
+
+
+def conversions(cfg: Config, db: DB) -> tuple[dict[int, dict], str]:
+    """Переходы в бот по роликам из базы бота; без базы — пусто."""
+    if not cfg.bot_database_url:
+        return {}, ""
+    from . import attribution, funnel
+    try:
+        users = funnel.users(cfg, 60)
+    except funnel.FunnelError as e:
+        log.warning("conversions: %s", e)
+        return {}, f"Переходы в бот не учтены: {e}".split("\n")[0]
+    conv = attribution.attribute(users, attribution.publications(db))
+    return conv, attribution.summary(conv)
 
 
 def _table(scored: list[dict], pb: dict) -> str:
-    lines = ["id | формат | хук | тема | просмотры | удержание | вовлечённость | ср.время,с | оценка"]
+    lines = ["id | формат | хук | тема | просмотры | удержание | вовлечённость | ср.время,с | "
+             "пришли в бот | купили | оценка"]
     for r in sorted(scored, key=lambda x: -x["score"]):
         hook = pb["hooks"].get(r["hook_id"], {}).get("pattern", r["hook_id"])
         lines.append(" | ".join(str(x) for x in (
@@ -110,6 +150,8 @@ def _table(scored: list[dict], pb: dict) -> str:
             None if r["hold"] is None else f"{r['hold']:.0%}",
             None if r["engagement_rate"] is None else f"{r['engagement_rate']:.1%}",
             None if not r.get("avg_watch_ms") else round(r["avg_watch_ms"] / 1000, 1),
+            None if r.get("regs") is None else round(r["regs"], 1),
+            None if r.get("bought") is None else round(r["bought"], 1),
             r["score"],
         )))
     return "\n".join(lines)
@@ -123,7 +165,8 @@ def run(cfg: Config, db: DB, ai: AI | None) -> str:
         return (f"Для выводов пока мало данных: {len(rows)} роликов со статистикой старше 2 суток, "
                 f"нужно минимум {MIN_POSTS}. Плейбук не менял.")
     pb = pbm.load(cfg.playbook_path)
-    scored = score_posts(rows)
+    conv, conv_text = conversions(cfg, db)
+    scored = score_posts(rows, conv)
     scores = arm_scores(scored)
 
     insights, summary = pb.get("insights", []), ""
@@ -144,7 +187,7 @@ def run(cfg: Config, db: DB, ai: AI | None) -> str:
     db.x("INSERT INTO playbook_history(created_at, playbook_json, note) VALUES (?,?,?)",
          (now_iso(), json.dumps(pb, ensure_ascii=False), "до анализа"))
     pbm.save(cfg.playbook_path, new)
-    return report(pb, new, scored, summary)
+    return report(pb, new, scored, summary, conv_text)
 
 
 def _changes(old: dict, new: dict, dim: str, label: dict[str, str]) -> list[str]:
@@ -160,7 +203,7 @@ def _changes(old: dict, new: dict, dim: str, label: dict[str, str]) -> list[str]
     return out
 
 
-def report(old: dict, new: dict, scored: list[dict], summary: str) -> str:
+def report(old: dict, new: dict, scored: list[dict], summary: str, conv_text: str = "") -> str:
     best = max(scored, key=lambda r: r["score"])
     hooks = {k: v["pattern"][:40] for k, v in new["hooks"].items()}
     themes = {k: v["title"] for k, v in new["themes"].items()}
@@ -168,6 +211,8 @@ def report(old: dict, new: dict, scored: list[dict], summary: str) -> str:
     if summary:
         parts.append(summary)
     parts.append(f"Лучший: #{best['post_id']} ({best.get('plays') or 0} просмотров).")
+    if conv_text:
+        parts.append(conv_text)
     styles = {k: f"стиль {k}" for k in new.get("styles", {})}
     audiences = {k: f"аудитория: {v['about'][:40]}" for k, v in new.get("audiences", {}).items()}
     changes = (_changes(old, new, "formats", {}) + _changes(old, new, "hooks", hooks)
