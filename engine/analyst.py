@@ -32,6 +32,7 @@ MIN_POSTS = 6           # меньше — выводы будут шумом
 MIN_PER_ARM = 2         # вариант с одним роликом не трогаем
 MIN_AGE_HOURS = 48      # свежие ролики ещё набирают просмотры
 WEIGHTS = {"plays": 0.40, "hold": 0.25, "engagement": 0.20, "watch": 0.15}
+USER_WINDOW_DAYS = 90  # за сколько дней берём пришедших в бот
 WEIGHTS_CONV = {"plays": 0.30, "hold": 0.20, "engagement": 0.15, "watch": 0.10, "conversion": 0.25}
 
 INSIGHT_SYSTEM = """Ты аналитик коротких видео. По таблице роликов аккаунта нейрофотографа
@@ -77,14 +78,17 @@ def score_posts(rows: list[dict], conv: dict[int, dict] | None = None) -> list[d
     """conv — переходы в бот по роликам; учитываются, если хоть один ролик кого-то привёл."""
     use_conv = bool(conv) and any(conv.get(r["post_id"], {}).get("points") for r in rows)
     w = WEIGHTS_CONV if use_conv else {**WEIGHTS, "conversion": 0.0}
-    points = [conv.get(r["post_id"], {}).get("points", 0.0) if use_conv else None for r in rows]
+    # ролики вне окна выборки пользователей (нет в conv) — середина рейтинга, а не последнее место
+    points = [conv[r["post_id"]].get("points", 0.0) if use_conv and r["post_id"] in conv else None for r in rows]
     rc = _ranks(points)
     plays = [r.get("plays") for r in rows]
     scale = skip_scale([r.get("skip_rate") for r in rows])
     hold = [None if r.get("skip_rate") is None else 1 - skip_pct(r["skip_rate"], scale) / 100 for r in rows]
-    eng = [None if not r.get("plays") else
-           ((r.get("saves") or 0) + (r.get("shares") or 0) + (r.get("comments") or 0)) / r["plays"]
-           for r in rows]
+    # вовлечённость — только по Instagram: сохранения и репосты известны только там
+    ig = [r.get("ig_plays", r.get("plays")) for r in rows]
+    eng = [None if not ig[i] else
+           ((r.get("saves") or 0) + (r.get("shares") or 0) + (r.get("comments") or 0)) / ig[i]
+           for i, r in enumerate(rows)]
     watch = [r.get("avg_watch_ms") for r in rows]
     rp, rh, re_, rw = _ranks(plays), _ranks(hold), _ranks(eng), _ranks(watch)
     scored = []
@@ -120,6 +124,7 @@ def eligible_rows(db: DB) -> list[dict]:
         if (r["published_at"] or "") > cutoff:
             continue
         d = dict(r)
+        d["ig_plays"] = d.get("plays")
         if yt.get(d["post_id"]):  # просмотры Shorts добавляем к просмотрам Reels
             d["plays"] = (d.get("plays") or 0) + yt[d["post_id"]]
         rows.append(d)
@@ -132,12 +137,19 @@ def conversions(cfg: Config, db: DB) -> tuple[dict[int, dict], str]:
         return {}, ""
     from . import attribution, funnel
     try:
-        users = funnel.users(cfg, 60)
+        users = funnel.users(cfg, USER_WINDOW_DAYS)
     except funnel.FunnelError as e:
         log.warning("conversions: %s", e)
         return {}, f"Переходы в бот не учтены: {e}".split("\n")[0]
-    conv = attribution.attribute(users, attribution.publications(db))
-    return conv, attribution.summary(conv)
+    pubs = attribution.publications(db)
+    conv = attribution.attribute(users, pubs)
+    # ролики, вышедшие внутри окна выборки, без переходов — честный ноль (а более старые не трогаем)
+    since = datetime.now(timezone.utc) - timedelta(days=USER_WINDOW_DAYS) + attribution.WINDOW
+    for items in pubs.values():
+        for pid, t in items:
+            if t >= since:
+                conv.setdefault(pid, {"regs": 0.0, "photo": 0.0, "bought": 0.0, "points": 0.0})
+    return conv, attribution.summary({k: v for k, v in conv.items() if v["regs"]})
 
 
 def _table(scored: list[dict], pb: dict) -> str:

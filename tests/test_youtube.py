@@ -118,19 +118,59 @@ class YouTubeTests(unittest.TestCase):
         m = self.db.one("SELECT * FROM platform_metrics WHERE post_id=?", (self.pid,))
         self.assertEqual((m["views"], m["likes"], m["comments"]), (1500, 40, 3))
 
-    def test_quota_error_and_retry(self):
+    def test_quota_postpones_and_other_errors_offer_retry(self):
         self.login()
         self.g.upload_status = 403
         self.engine.on_approved(self.pid, now=True)
         self.engine.job_crosspost()
+        row = self.db.crosspost(self.pid, "yt")
+        self.assertEqual(row["status"], "queued")          # квота — сам повторит через сутки
+        self.assertTrue(row["due_at"].startswith("2026-10-21"))
+        self.assertIn("отложен", self.bot.said[-1][0])
+        # прочая ошибка — кнопка повтора
+        self.db.update_crosspost(self.pid, "yt", due_at="2026-01-01T00:00:00+00:00")
+        self.g.upload_status = 500
+        self.g.put = lambda *a, **k: R(500, {"error": {"message": "backend", "errors": [{"reason": "backendError"}]}})
+        with mock.patch("engine.youtube.requests.put", side_effect=self.g.put):
+            self.engine.job_crosspost()
         self.assertEqual(self.db.crosspost(self.pid, "yt")["status"], "failed")
-        text, markup = self.bot.said[-1]
-        self.assertIn("квота YouTube API исчерпана", text)
-        self.assertEqual(markup["inline_keyboard"][0][0]["callback_data"], f"ytretry:{self.pid}")
-        self.g.upload_status = 200
-        self.engine.yt_retry(self.pid)
-        self.engine.job_crosspost()
-        self.assertEqual(self.db.crosspost(self.pid, "yt")["status"], "published")
+        self.assertEqual(self.bot.said[-1][1]["inline_keyboard"][0][0]["callback_data"], f"ytretry:{self.pid}")
+
+    def test_lost_response_resumes_session_instead_of_new_upload(self):
+        self.login()
+        self.db.set(f"yt_session:{self.pid}", "https://upload.example/session1")
+        calls = []
+
+        def put(url, data=None, headers=None, timeout=None):
+            calls.append(headers.get("Content-Range"))
+            return R(200, {"id": "abc123"})   # YouTube уже всё получил
+        with mock.patch("engine.youtube.requests.put", side_effect=put):
+            self.db.queue_crosspost(self.pid, "yt", "2026-01-01T00:00:00+00:00")
+            self.engine.job_crosspost()
+        self.assertEqual(calls, ["bytes */2048"])
+        self.assertIsNone(self.g.meta)      # новая загрузка не начиналась
+        self.assertEqual(self.db.crosspost(self.pid, "yt")["external_id"], "abc123")
+
+    def test_private_visibility_is_reported(self):
+        self.login()
+        orig = self.g.request
+
+        def req(method, url, params=None, headers=None, timeout=None):
+            if url.endswith("/videos") and params.get("part") == "status":
+                return R(200, {"items": [{"status": {"privacyStatus": "private", "uploadStatus": "uploaded"}}]})
+            return orig(method, url, params=params, headers=headers, timeout=timeout)
+        with mock.patch("engine.youtube.requests.request", side_effect=req):
+            url = self.engine.yt.publish(self.pid)
+        self.assertIn("аудит YouTube API", url)
+
+    def test_callback_escapes_error_text(self):
+        self.engine.yt.start_login()
+        state = self.db.get("yt_state")
+        page = self.engine.yt_callback({"state": state, "error": "x", "error_description": "<script>alert(1)</script>"})
+        self.assertNotIn("<script>", page)
+        self.assertIn("&lt;script&gt;", page)
+        page = self.engine.yt_callback({"state": "чужой", "error": "x", "error_description": "<b>фишинг</b>"})
+        self.assertNotIn("фишинг", page)
 
     def test_expired_token_is_refreshed(self):
         self.login()

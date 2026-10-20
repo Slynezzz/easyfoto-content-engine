@@ -38,11 +38,30 @@ REFRESH_EARLY = timedelta(minutes=5)
 
 
 class YTError(RuntimeError):
-    pass
+    def __init__(self, msg: str, retry_after: timedelta | None = None):
+        super().__init__(msg)
+        self.retry_after = retry_after  # если задано — движок сам повторит позже
+
+
+QUOTA_REASONS = {"quotaExceeded": timedelta(hours=24), "uploadLimitExceeded": timedelta(hours=24),
+                 "rateLimitExceeded": timedelta(minutes=30)}
 
 
 def redirect_uri(cfg: Config) -> str:
     return f"{cfg.public_base_url}/yt/callback"
+
+
+def _reason(r) -> str:
+    try:
+        err = r.json().get("error")
+    except ValueError:
+        return ""
+    return ((err.get("errors") or [{}])[0]).get("reason") or "" if isinstance(err, dict) else ""
+
+
+def _raise(r, prefix: str = "YouTube") -> None:
+    reason = _reason(r)
+    raise YTError(f"{prefix}: {_error_text(r)}", QUOTA_REASONS.get(reason))
 
 
 def _error_text(r) -> str:
@@ -55,8 +74,9 @@ def _error_text(r) -> str:
         reason = ((err.get("errors") or [{}])[0]).get("reason") or ""
         msg = err.get("message") or ""
         hints = {
-            "quotaExceeded": "дневная квота YouTube API исчерпана — продолжу завтра",
-            "uploadLimitExceeded": "YouTube ограничил число загрузок на канале — продолжу позже",
+            "quotaExceeded": "дневная квота YouTube API исчерпана — сам повторю через сутки",
+            "uploadLimitExceeded": "YouTube ограничил число загрузок на канале — сам повторю через сутки",
+            "rateLimitExceeded": "слишком много запросов к YouTube — сам повторю через полчаса",
             "youtubeSignupRequired": "у аккаунта нет канала YouTube — создай канал и войди снова (/youtube)",
             "forbidden": "нет прав на загрузку — войди снова (/youtube) и разреши загрузку видео",
         }
@@ -108,11 +128,11 @@ class YouTube:
         self.db.set("yt_auth_error", "")
 
     def finish_login(self, params: dict) -> str:
-        if params.get("error"):
-            raise YTError(params.get("error_description") or params["error"])
         state = self.db.get("yt_state") or ""
         if not state or params.get("state") != state:
             raise YTError("ссылка входа устарела — набери /youtube и войди по новой ссылке")
+        if params.get("error"):  # текст ошибки показываем, только если запрос пришёл по нашей ссылке
+            raise YTError(str(params.get("error_description") or params["error"])[:200])
         if not params.get("code"):
             raise YTError("Google не вернул код входа")
         d = self._token_request({"grant_type": "authorization_code", "code": params["code"],
@@ -187,27 +207,70 @@ class YouTube:
                             "tags": ["нейрофото", "нейрофотосессия", "ai фото", "shorts"],
                             "defaultLanguage": "ru", "defaultAudioLanguage": "ru"},
                 "status": {"privacyStatus": self.cfg.yt_privacy, "selfDeclaredMadeForKids": False}}
+        size = video.stat().st_size
         token = self.token
+        key = f"yt_session:{post_id}"
         try:
-            r = requests.post(f"{UPLOAD}?uploadType=resumable&part=snippet,status", json=meta, timeout=60,
-                              headers={"Authorization": f"Bearer {token}",
-                                       "X-Upload-Content-Type": "video/mp4",
-                                       "X-Upload-Content-Length": str(video.stat().st_size)})
-            if r.status_code >= 400 or not r.headers.get("Location"):
-                raise YTError(f"YouTube: {_error_text(r)}")
-            with open(video, "rb") as f:
-                up = requests.put(r.headers["Location"], data=f, timeout=900,
-                                  headers={"Authorization": f"Bearer {token}", "Content-Type": "video/mp4"})
+            vid = self._resume(self.db.get(key) or "", video, size, token) if self.db.get(key) else None
+            if not vid:
+                r = requests.post(f"{UPLOAD}?uploadType=resumable&part=snippet,status", json=meta, timeout=60,
+                                  headers={"Authorization": f"Bearer {token}",
+                                           "X-Upload-Content-Type": "video/mp4",
+                                           "X-Upload-Content-Length": str(size)})
+                if r.status_code >= 400 or not r.headers.get("Location"):
+                    _raise(r)
+                # запоминаем сессию загрузки: если ответ потеряется, повтор спросит её, а не загрузит заново
+                self.db.set(key, r.headers["Location"])
+                with open(video, "rb") as f:
+                    up = requests.put(r.headers["Location"], data=f, timeout=900,
+                                      headers={"Authorization": f"Bearer {token}", "Content-Type": "video/mp4"})
+                if up.status_code not in (200, 201):
+                    _raise(up)
+                vid = up.json().get("id")
         except requests.RequestException as e:
-            raise YTError(f"загрузка в YouTube не удалась ({type(e).__name__})") from None
-        if up.status_code not in (200, 201):
-            raise YTError(f"YouTube: {_error_text(up)}")
-        vid = up.json().get("id")
+            raise YTError(f"загрузка в YouTube не удалась ({type(e).__name__}); при повторе продолжу ту же загрузку") from None
         if not vid:
             raise YTError("YouTube не вернул id ролика")
+        self.db.set(key, "")
         url = f"https://youtube.com/shorts/{vid}"
         self.db.update_crosspost(post_id, "yt", external_id=vid, url=url, error=None)
-        return url
+        return url + self._visibility_warning(vid)
+
+    def _resume(self, session: str, video: Path, size: int, token: str) -> str | None:
+        """Спрашивает незавершённую сессию загрузки. Возвращает id, если видео уже загружено;
+        дозагружает остаток; None — сессия истекла, нужна новая загрузка."""
+        st = requests.put(session, timeout=60, headers={"Authorization": f"Bearer {token}",
+                                                        "Content-Range": f"bytes */{size}", "Content-Length": "0"})
+        if st.status_code in (200, 201):
+            return st.json().get("id")
+        if st.status_code != 308:
+            return None
+        rng = st.headers.get("Range", "")  # «bytes=0-12345» — сколько уже принято
+        start = int(rng.rsplit("-", 1)[1]) + 1 if rng else 0
+        with open(video, "rb") as f:
+            f.seek(start)
+            up = requests.put(session, data=f, timeout=900,
+                              headers={"Authorization": f"Bearer {token}", "Content-Type": "video/mp4",
+                                       "Content-Range": f"bytes {start}-{size - 1}/{size}"})
+        if up.status_code not in (200, 201):
+            _raise(up)
+        return up.json().get("id")
+
+    def _visibility_warning(self, vid: str) -> str:
+        """Проверяем, с какой видимостью YouTube принял ролик (непроверенные проекты он может закрыть)."""
+        try:
+            items = self._api("GET", "videos", part="status", id=vid).get("items") or []
+        except YTError as e:
+            log.warning("yt status %s: %s", vid, e)
+            return ""
+        st = (items[0].get("status") if items else {}) or {}
+        if st.get("uploadStatus") in ("rejected", "failed"):
+            return f"\n⚠️ YouTube отклонил видео: {st.get('rejectionReason') or st.get('failureReason') or st['uploadStatus']}"
+        if st.get("privacyStatus") and st["privacyStatus"] != self.cfg.yt_privacy:
+            return (f"\n⚠️ YouTube выставил видимость «{st['privacyStatus']}» вместо «{self.cfg.yt_privacy}». "
+                    "Так бывает с непроверенными проектами Google Cloud: нужен аудит YouTube API "
+                    "(форма YouTube API Services Audit) — или открой ролик вручную в YouTube Studio.")
+        return ""
 
     def stats(self, ids: list[str]) -> dict[str, dict]:
         """Просмотры, лайки, комментарии по id роликов (до 50 за раз)."""

@@ -697,7 +697,9 @@ class AdminBot:
                  "Иначе Google отзывает вход через 7 дней.\n"
                  "3. «Credentials → Create credentials → OAuth client ID», тип «Web application», "
                  f"Authorized redirect URI: https://{host}/yt/callback\n"
-                 "4. Client ID и Client secret — в Railway: YT_CLIENT_ID и YT_CLIENT_SECRET, затем Deploy и снова /youtube.")
+                 "4. Client ID и Client secret — в Railway: YT_CLIENT_ID и YT_CLIENT_SECRET, затем Deploy и снова /youtube.\n"
+                 "После первой публикации я проверю, с какой видимостью YouTube принял ролик: если он окажется "
+                 "закрытым (так YouTube иногда поступает с непроверенными проектами), подскажу, что делать.")
         if not (self.cfg.yt_client_id and self.cfg.yt_client_secret):
             return "Чтобы ролики выходили в YouTube Shorts:\n" + setup
         if not self.s.yt_login:

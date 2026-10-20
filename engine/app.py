@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import html
 import logging
 import random
 import threading
@@ -176,7 +177,8 @@ class Engine:
             text = self.yt.finish_login(params)
         except YTError as e:
             self.say(f"⚠️ YouTube не подключился: {e}")
-            return f"<h3>YouTube не подключился</h3><p>{e}</p><p>Набери /youtube в админ-боте и попробуй снова.</p>"
+            return (f"<h3>YouTube не подключился</h3><p>{html.escape(str(e))}</p>"
+                    "<p>Набери /youtube в админ-боте и попробуй снова.</p>")
         self.say(text)
         return "<h3>✅ YouTube подключён</h3><p>Можно закрыть страницу и вернуться в админ-бот.</p>"
 
@@ -186,7 +188,8 @@ class Engine:
             text = self.vk.finish_login(params)
         except VKError as e:
             self.say(f"⚠️ VK не подключился: {e}")
-            return f"<h3>VK не подключился</h3><p>{e}</p><p>Набери /vk в админ-боте и попробуй снова.</p>"
+            return (f"<h3>VK не подключился</h3><p>{html.escape(str(e))}</p>"
+                    "<p>Набери /vk в админ-боте и попробуй снова.</p>")
         self.say(text)
         return "<h3>✅ VK подключён</h3><p>Можно закрыть страницу и вернуться в админ-бот.</p>"
 
@@ -231,6 +234,12 @@ class Engine:
                 url = client.publish(pid)
             except Exception as e:  # noqa: BLE001 — любая ошибка не должна оставить пост «в публикации»
                 msg = str(e) if isinstance(e, err_cls) else f"{type(e).__name__}: {e}"
+                later = getattr(e, "retry_after", None)
+                if later:  # квота или лимит площадки — повторим сами
+                    when = (self.now() + later).astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+                    self.db.update_crosspost(pid, platform, status="queued", due_at=when, error=msg[:500])
+                    self.say(f"⏳ {label}: ролик #{pid} отложен: {msg}")
+                    continue
                 self.db.update_crosspost(pid, platform, status="failed", error=msg[:500])
                 self.say(f"⚠️ {label}: ролик #{pid} не опубликован: {msg}",
                          {"inline_keyboard": [[{"text": "🔁 Повторить",

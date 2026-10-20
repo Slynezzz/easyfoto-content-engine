@@ -173,11 +173,11 @@ class VK:
         self.db.set("vk_auth_error", "")
 
     def finish_login(self, params: dict) -> str:
-        if params.get("error"):
-            raise VKError(params.get("error_description") or params["error"])
         state = self.db.get("vk_pkce_state") or ""
         if not state or params.get("state") != state:
             raise VKError("ссылка входа устарела — набери /vk и войди по новой ссылке")
+        if params.get("error"):  # текст ошибки показываем, только если запрос пришёл по нашей ссылке
+            raise VKError(str(params.get("error_description") or params["error"])[:200])
         if not params.get("code") or not params.get("device_id"):
             raise VKError("VK не вернул код входа")
         d = self._oauth({"grant_type": "authorization_code", "code": params["code"],

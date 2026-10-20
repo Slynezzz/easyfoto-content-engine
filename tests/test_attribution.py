@@ -54,9 +54,23 @@ class ScoringTests(unittest.TestCase):
     def test_conversion_changes_the_winner(self):
         same = analyst.score_posts([dict(r) for r in self.rows])
         self.assertEqual(same[0]["score"], same[1]["score"])
-        scored = analyst.score_posts([dict(r) for r in self.rows], {2: {"points": 9.0, "regs": 1, "bought": 1}})
+        scored = analyst.score_posts([dict(r) for r in self.rows],
+                                     {1: {"points": 0.0}, 2: {"points": 9.0, "regs": 1, "bought": 1}})
         self.assertGreater(scored[1]["score"], scored[0]["score"])
         self.assertEqual(scored[1]["regs"], 1)
+
+    def test_engagement_uses_instagram_plays_only(self):
+        rows = [dict(r) for r in self.rows]
+        rows[1]["ig_plays"], rows[1]["plays"] = 1000, 5000   # +4000 просмотров Shorts
+        scored = analyst.score_posts(rows)
+        self.assertAlmostEqual(scored[1]["engagement_rate"], 0.015)
+
+    def test_posts_outside_window_get_middle_rank(self):
+        rows = [dict(r) for r in self.rows] + [dict(self.rows[0], post_id=3)]
+        conv = {1: {"points": 0.0}, 2: {"points": 9.0}}   # #3 — старый, вне окна
+        sc = {r["post_id"]: r["score"] for r in analyst.score_posts(rows, conv)}
+        self.assertGreater(sc[2], sc[3])
+        self.assertGreater(sc[3], sc[1])
 
     def test_no_conversions_keeps_old_weights(self):
         a = analyst.score_posts([dict(r) for r in self.rows])
