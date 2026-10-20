@@ -82,6 +82,9 @@ class Config:
     vk_group_id: int = field(default_factory=lambda: _int("VK_GROUP_ID", 0))
     vk_app_id: str = field(default_factory=lambda: _env("VK_APP_ID"))
     vk_access_token: str = field(default_factory=lambda: _env("VK_ACCESS_TOKEN"))  # можно не задавать: вход через /vk
+    vk_client_secret: str = field(default_factory=lambda: _env("VK_CLIENT_SECRET"))  # «Защищённый ключ», если VK требует
+    vk_scope: str = field(default_factory=lambda: _env("VK_SCOPE", "video wall groups"))
+    vk_id_host: str = field(default_factory=lambda: _env("VK_ID_HOST", "https://id.vk.ru").rstrip("/"))
     vk_wallpost: bool = field(default_factory=lambda: _env("VK_WALLPOST", "1") not in ("0", "false", "no"))
     # куда ведёт ссылка в VK: max (бот в MAX) или tg (бот в Telegram)
     vk_link_target: str = field(default_factory=lambda: _env("VK_LINK_TARGET", "max"))

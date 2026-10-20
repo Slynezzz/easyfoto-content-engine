@@ -84,7 +84,48 @@ class VKTests(unittest.TestCase):
         self.assertIn("бессрочный", msg)
         self.assertIn("Нейрофото", msg)
         self.assertTrue(self.engine.vk.ready())
-        self.assertIn("scope=video,wall,groups,offline", vk.auth_url(self.cfg))
+        self.assertIn("scope=video,wall,groups,offline", vk.legacy_auth_url(self.cfg))
+
+    def test_vk_id_login_exchange_and_auto_refresh(self):
+        self.cfg.public_base_url = "https://engine.up.railway.app"
+        link = self.engine.vk.start_login()
+        q = {k: v[0] for k, v in __import__("urllib.parse").parse.parse_qs(link.split("?", 1)[1]).items()}
+        self.assertTrue(link.startswith("https://id.vk.ru/authorize?"))
+        self.assertEqual(q["redirect_uri"], "https://engine.up.railway.app/vk/callback")
+        self.assertEqual((q["code_challenge_method"], q["scope"]), ("S256", "video wall groups"))
+        oauth = []
+
+        def post(url, data=None, files=None, timeout=None):
+            if "oauth2/auth" in url:
+                oauth.append(dict(data))
+                n = len(oauth)
+                return R({"access_token": f"vk2.a.T{n}", "refresh_token": f"R{n}", "expires_in": 3600,
+                          "user_id": 42, "scope": "video wall groups"})
+            return VKApi().post(url, data=data, files=files, timeout=timeout)
+        with mock.patch("engine.vk.requests.post", side_effect=post):
+            with self.assertRaises(vk.VKError):
+                self.engine.vk.finish_login({"code": "c", "state": "чужой", "device_id": "d"})
+            msg = self.engine.vk.finish_login({"code": "c", "state": q["state"], "device_id": "dev1"})
+            self.assertIn("✅ VK подключён (VK ID): Максим", msg)
+            self.assertNotIn("не хватает", msg)
+            ex = oauth[0]
+            self.assertEqual((ex["grant_type"], ex["device_id"], ex["client_id"]), ("authorization_code", "dev1", "123"))
+            self.assertEqual(self.engine.vk.token, "vk2.a.T1")      # ключ свежий — без продления
+            self.db.set("vk_token_expires", "2000-01-01T00:00:00+00:00")
+            self.assertEqual(self.engine.vk.token, "vk2.a.T2")      # истёк — продлили сами
+            self.assertEqual((oauth[1]["grant_type"], oauth[1]["refresh_token"]), ("refresh_token", "R1"))
+            # ссылка входа одноразовая
+            with self.assertRaises(vk.VKError):
+                self.engine.vk.finish_login({"code": "c", "state": q["state"], "device_id": "dev1"})
+        self.assertIn("VK ID", self.engine.vk.status())
+
+    def test_refresh_failure_is_reported(self):
+        self.db.set("vk_refresh_token", "R")
+        self.db.set("vk_token_expires", "2000-01-01T00:00:00+00:00")
+        with mock.patch("engine.vk.requests.post", return_value=R({"error": "invalid_grant"})):
+            warn = self.engine.vk.token_warning()
+        self.assertIn("не удалось продлить", warn)
+        self.assertIn("не продлевается", self.engine.vk.status())
 
     def test_approval_queues_vk_at_slot_and_publishes_with_bot_link(self):
         api = VKApi()

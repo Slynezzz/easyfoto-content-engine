@@ -19,12 +19,16 @@ TYPES = {"mp4": "video/mp4", "jpg": "image/jpeg"}
 CHUNK = 256 * 1024
 
 
-def make_handler(media_dir: Path):
+def make_handler(media_dir: Path, routes: dict | None = None):
+    """routes: {путь: функция(параметры запроса) -> HTML} — например, возврат после входа в VK."""
+    routes = routes or {}
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "content-engine"
 
-        def log_message(self, fmt, *args):  # в логи Railway — без токенов роликов
-            log.info("%s %s", self.address_string(), MEDIA_TOKEN_RE.sub("/media/***", fmt % args))
+        def log_message(self, fmt, *args):  # в логи Railway — без токенов роликов и кодов входа
+            line = MEDIA_TOKEN_RE.sub("/media/***", fmt % args)
+            log.info("%s %s", self.address_string(), re.sub(r"\?[^ ]*", "?***", line))
 
         def _send_file(self, head_only: bool):
             m = MEDIA_RE.match(self.path.split("?", 1)[0])
@@ -72,6 +76,24 @@ def make_handler(media_dir: Path):
                     left -= len(chunk)
 
         def do_GET(self):
+            path, _, query = self.path.partition("?")
+            if path in routes:
+                from urllib.parse import parse_qs
+                params = {k: v[0] for k, v in parse_qs(query).items()}
+                try:
+                    html = routes[path](params)
+                except Exception:  # noqa: BLE001
+                    log.exception("route %s", path)
+                    html = "<h3>Ошибка. Подробности — в админ-боте.</h3>"
+                body = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+                        f"<body style='font-family:sans-serif;padding:24px'>{html}</body>").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if self.path in ("/", "/health"):
                 body = b"ok"
                 self.send_response(200)
@@ -88,8 +110,8 @@ def make_handler(media_dir: Path):
     return Handler
 
 
-def start(media_dir: Path, port: int, host: str = "0.0.0.0") -> ThreadingHTTPServer:
-    srv = ThreadingHTTPServer((host, port), make_handler(media_dir))
+def start(media_dir: Path, port: int, host: str = "0.0.0.0", routes: dict | None = None) -> ThreadingHTTPServer:
+    srv = ThreadingHTTPServer((host, port), make_handler(media_dir, routes))
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, name="http", daemon=True).start()
     log.info("HTTP-сервер слушает порт %s", port)

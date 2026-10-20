@@ -72,6 +72,7 @@ class Services:
     occasions_text: Callable[[], str] = lambda: "Календарь поводов недоступен"
     on_approved: Callable[[int, bool], str] | None = None   # поставить публикации на других площадках
     vk_connect: Callable[[str], str] | None = None          # сохранить вход в VK из адреса страницы
+    vk_login: Callable[[], str] | None = None               # ссылка входа VK ID
     vk_retry: Callable[[int], str] | None = None
     balances_text: Callable[[], str] = lambda: "Проверка балансов недоступна"
     vk_status: Callable[[], str] = lambda: "VK: не подключён"
@@ -663,19 +664,29 @@ class AdminBot:
             self.say("Не знаю такой команды.\n\n" + HELP)
 
     def vk_help(self) -> str:
-        from . import vk
+        from urllib.parse import urlparse
+        host = urlparse(self.cfg.public_base_url).netloc or "адрес-движка.up.railway.app"
+        setup = ("Настройки приложения в кабинете VK ID (id.vk.ru/about/business/go → Мои приложения):\n"
+                 "• платформа «Web»;\n"
+                 f"• базовый домен: {host}\n"
+                 f"• доверенный redirect URL: https://{host}/vk/callback\n"
+                 "• Доступы: включи «Стена», «Видео» и «Сообщества» (это расширенные доступы — "
+                 "нужен подтверждённый профиль бизнеса, ИП подходит).")
         if not self.cfg.vk_app_id:
-            return ("Чтобы ролики выходили в VK Клипы:\n"
-                    "1. Открой dev.vk.com → «Мои приложения» → «Создать», тип «Standalone-приложение» "
-                    "(или «Веб» в кабинете VK ID, если старого раздела нет). Скопируй ID приложения.\n"
-                    "2. В Railway добавь VK_APP_ID = этот ID и VK_GROUP_ID = номер сообщества "
-                    "(цифры из адреса club123456 или из «Управление → Адрес»).\n"
-                    "3. После деплоя снова набери /vk — пришлю ссылку для входа.")
+            return ("Чтобы ролики выходили в VK Клипы:\n" + setup +
+                    "\n\nЗатем в Railway: VK_APP_ID = ID приложения, VK_GROUP_ID = номер сообщества "
+                    "(цифры из адреса club123456). После деплоя снова /vk — пришлю ссылку входа.")
+        if not self.s.vk_login:
+            return "Подключение VK недоступно."
+        try:
+            link = self.s.vk_login()
+        except Exception as e:  # noqa: BLE001
+            return f"⚠️ {e}"
         return ("Вход в VK:\n"
-                f"1. Открой ссылку и разреши доступ (видео, стена, сообщества): {vk.auth_url(self.cfg)}\n"
-                "2. VK откроет почти пустую страницу. Скопируй адрес из адресной строки целиком "
-                "(начинается с https://oauth.vk.com/blank.html#access_token=) и пришли сюда.\n"
-                "Сообщение с ключом я сразу удалю из чата.")
+                f"1. Открой ссылку (действует один раз): {link}\n"
+                "2. Войди и разреши доступы. VK вернёт тебя на страницу движка «✅ VK подключён», "
+                "а сюда придёт отчёт. Копировать ничего не нужно.\n\n"
+                "Если VK пишет ошибку про redirect_uri или scope — проверь настройки:\n" + setup)
 
     def queue_text(self) -> str:
         lines = []

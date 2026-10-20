@@ -296,6 +296,7 @@ class AdminBotTests(unittest.TestCase):
         self.bot.handle(msg("/vk"))
         self.assertIn("VK_APP_ID", self.api.texts()[-1])
         self.cfg.vk_app_id = "55"
+        self.bot.s.vk_login = lambda: "https://id.vk.ru/authorize?client_id=55"
         self.bot.handle(msg("/vk"))
         self.assertIn("client_id=55", self.api.texts()[-1])
 

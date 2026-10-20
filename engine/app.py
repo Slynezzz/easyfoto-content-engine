@@ -154,6 +154,16 @@ class Engine:
             return ""
         return "📘 VK: сейчас" if now or when <= self.now() else f"📘 VK: {when:%d.%m %H:%M}"
 
+    def vk_callback(self, params: dict) -> str:
+        """Возврат из VK ID после входа: обмениваем код на ключи, пишем итог в админ-бот."""
+        try:
+            text = self.vk.finish_login(params)
+        except VKError as e:
+            self.say(f"⚠️ VK не подключился: {e}")
+            return f"<h3>VK не подключился</h3><p>{e}</p><p>Набери /vk в админ-боте и попробуй снова.</p>"
+        self.say(text)
+        return "<h3>✅ VK подключён</h3><p>Можно закрыть страницу и вернуться в админ-бот.</p>"
+
     def vk_retry(self, post_id: int) -> str:
         due = self.now().astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
         if not self.db.claim_crosspost(post_id, "vk", "failed", "queued"):
@@ -447,6 +457,7 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
             scout_trends=lambda: scout.run(cfg, db, ai),
             on_approved=engine.on_approved,
             vk_connect=engine.vk.save_token,
+            vk_login=engine.vk.start_login,
             vk_retry=engine.vk_retry,
             vk_status=engine.vk.status,
             balances_text=lambda: balances.report(cfg, db),
@@ -461,7 +472,7 @@ def main() -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     cfg = Config()
     engine, bot = build(cfg)
-    server.start(cfg.media_dir, cfg.port)
+    server.start(cfg.media_dir, cfg.port, routes={"/vk/callback": engine.vk_callback})
     log.info("старт: слоты %s, источник фото %s, Instagram %s", cfg.publish_hours_list[: cfg.reels_per_day],
              cfg.image_source, "подключён" if engine.ig.ready() else "не подключён")
     if not bot:
