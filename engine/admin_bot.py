@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import brief, images
+from . import brief, images, music
 from .config import Config
 from .db import DB
 from .telegram import TelegramAPI, TelegramError
@@ -39,6 +39,7 @@ HELP = """Команды:
 /pause и /resume — остановить или включить автопубликацию
 /scan — разобрать новые фото
 /photos — хранилище фото: посмотреть, удалить, перенести
+/music — какая музыка есть (добавить — прислать mp3 с подписью «музыка мистика»)
 /move 5 до — перенести 5 последних фото в селфи «до» (или «реф», «библиотека»)
 
 Фото: просто пришли их сюда (лучше файлом, без сжатия).
@@ -198,6 +199,11 @@ class AdminBot:
             return
         if chat_id != self.admin:
             return
+        cap = (msg.get("caption") or "").strip().lower()
+        if msg.get("audio") or (msg.get("document") and cap.startswith("музык")
+                                and Path((msg["document"].get("file_name") or "")).suffix.lower() in music.AUDIO_EXT):
+            self.on_music(msg)
+            return
         if msg.get("photo") or msg.get("document"):
             self.on_file(msg)
             return
@@ -268,6 +274,21 @@ class AdminBot:
                                                   "с разных ракурсов при хорошем свете.")
         finally:
             Path(path).unlink(missing_ok=True)
+
+    # -------------------------------------------------------------- music
+    def on_music(self, msg: dict) -> None:
+        f = msg.get("audio") or msg.get("document")
+        name = (f.get("file_name") or "track.mp3").lower()
+        ext = Path(name).suffix.lower()
+        if ext not in music.AUDIO_EXT:
+            ext = ".mp3"
+        if (f.get("file_size") or 0) > 20 * 1024 * 1024:
+            self.say("Трек больше 20 МБ — Telegram не даст его скачать боту.")
+            return
+        mood = music.mood_from_caption(msg.get("caption") or "")
+        dest = music.music_dir(self.cfg) / mood / f"{uuid.uuid4().hex[:10]}{ext}"
+        self.api.download(f["file_id"], dest)
+        self.say(f"Сохранил трек, настроение: {music.MOOD_RU[mood]}.\n\n{music.summary(self.cfg)}")
 
     # -------------------------------------------------------------- brief
     def on_brief_file(self, doc: dict) -> None:
@@ -510,6 +531,8 @@ class AdminBot:
         elif cmd == "/brief_reset":
             brief.reset(self.cfg)
             self.say("Вернул стандартный бриф.")
+        elif cmd == "/music":
+            self.say(music.summary(self.cfg))
         elif cmd == "/photos":
             self.photos_menu()
         elif cmd == "/move":

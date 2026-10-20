@@ -8,7 +8,7 @@ import random
 import secrets
 from datetime import date
 
-from . import brief, images, planner
+from . import brief, images, music, planner
 from . import occasions as occ_mod
 from . import playbook as pbm
 from .config import Config
@@ -126,6 +126,9 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
     fmt = FORMATS[choice.format]
     seed = rng.randrange(1 << 30)
     spec = fmt(before["path"], paths, script, music_seed=seed) if before else fmt(paths, script, music_seed=seed)
+    track = music.pick(cfg, occasion.mood if occasion else None, random.Random(seed))
+    if track:
+        spec.music = track
 
     db.set("last_ai_error", "" if plan.llm_ok else plan.llm_error or "нейросеть не ответила")
     token = secrets.token_urlsafe(18)
