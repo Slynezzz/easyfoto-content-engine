@@ -184,5 +184,14 @@ class YouTubeTests(unittest.TestCase):
         self.assertIn("YT_CLIENT_ID", self.engine.yt.status())
 
 
+class LegalPagesTests(unittest.TestCase):
+    def test_pages_for_google_branding(self):
+        from engine import server
+        pages = server.legal_pages("@Easyfotobot")
+        self.assertEqual(set(pages), {"/home", "/privacy", "/terms"})
+        self.assertIn("не передаются третьим лицам", pages["/privacy"]({}))
+        self.assertIn("t.me/Easyfotobot", pages["/home"]({}))
+
+
 if __name__ == "__main__":
     unittest.main()

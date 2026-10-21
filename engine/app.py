@@ -549,7 +549,8 @@ def main() -> None:
     cfg = Config()
     engine, bot = build(cfg)
     server.start(cfg.media_dir, cfg.port, routes={"/vk/callback": engine.vk_callback,
-                                                  "/yt/callback": engine.yt_callback})
+                                                  "/yt/callback": engine.yt_callback,
+                                                  **server.legal_pages(cfg.bot_username)})
     log.info("старт: слоты %s, источник фото %s, Instagram %s", cfg.publish_hours_list[: cfg.reels_per_day],
              cfg.image_source, "подключён" if engine.ig.ready() else "не подключён")
     if not bot:
