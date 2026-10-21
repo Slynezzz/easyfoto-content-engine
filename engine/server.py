@@ -121,7 +121,7 @@ def start(media_dir: Path, port: int, host: str = "0.0.0.0", routes: dict | None
 def legal_pages(bot: str) -> dict:
     """Страницы приложения для Google (Branding): главная, политика конфиденциальности, условия."""
     bot = bot.lstrip("@")
-    home = (f"<h2>AI-Photo — контент-движок Easyfotobot</h2>"
+    home = (f"<h2>AI-Photo</h2><p><b>AI-Photo</b> — контент-движок нейрофотографа Easyfotobot.</p>"
             f"<p>Служебное приложение владельца Telegram-бота <a href='https://t.me/{bot}'>@{bot}</a>: "
             "публикует короткие ролики владельца в его собственные аккаунты (YouTube Shorts, Instagram, VK) "
             "после его одобрения и собирает статистику этих роликов.</p>"
