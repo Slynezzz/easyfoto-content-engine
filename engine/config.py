@@ -42,6 +42,10 @@ class Config:
     # Модель, которая пишет хуки и тексты роликов (сильнее — убедительнее). Пусто — та же, что для служебных задач.
     copy_model: str = field(default_factory=lambda: _env("COPY_MODEL", "claude-sonnet-5-5"))
     openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY"))
+    # Запасные ключи тех же посредников (через запятую): кончился лимит у одного — движок берёт следующий
+    gemini_api_keys: str = field(default_factory=lambda: _env("GEMINI_API_KEYS"))
+    openai_api_keys: str = field(default_factory=lambda: _env("OPENAI_API_KEYS"))
+    image_api_keys: str = field(default_factory=lambda: _env("IMAGE_API_KEYS"))
     openai_text_model: str = field(default_factory=lambda: _env("OPENAI_TEXT_MODEL", "gpt-4.1-mini"))
     openai_image_model: str = field(default_factory=lambda: _env("OPENAI_IMAGE_MODEL", "gpt-image-1.5"))
     # Отдельный ключ только для картинок (например, AI STAR для gpt-image, а тексты — через SaintStore)

@@ -43,7 +43,51 @@ class Instagram:
         return self.cfg.ig_access_token
 
     def ready(self) -> bool:
-        return bool(self.cfg.ig_user_id and self.token and self.cfg.public_base_url)
+        return bool(self.token and self.cfg.public_base_url)
+
+    @property
+    def account_id(self) -> str:
+        """Номер профессионального аккаунта, к которому относится токен.
+
+        В IG_USER_ID легко вписать не тот номер (id приложения, страницы, «app-scoped»
+        id из ответа /me) — тогда Meta отвечает «Object with ID … does not exist
+        (code 100, sub 33)». Поэтому номер берём у самого токена: GET /me → user_id.
+        """
+        src = self.token
+        if self.db.get("ig_account_id") and self.db.get("ig_account_src") == src[-16:]:
+            return self.db.get("ig_account_id")
+        try:
+            me = self._req("GET", "me", fields="user_id,username")
+        except IGError as e:
+            log.warning("ig /me: %s", e)
+            return self.cfg.ig_user_id
+        acc = str(me.get("user_id") or me.get("id") or self.cfg.ig_user_id)
+        self.db.set("ig_account_id", acc)
+        self.db.set("ig_account_src", src[-16:])
+        self.db.set("ig_username", str(me.get("username") or ""))
+        if self.cfg.ig_user_id and self.cfg.ig_user_id != acc:
+            log.warning("IG_USER_ID %s не совпадает с аккаунтом токена %s — использую %s",
+                        self.cfg.ig_user_id, acc, acc)
+        return acc
+
+    def check(self) -> str:
+        """Строка для /status: к какому аккаунту привязан токен и годится ли он."""
+        if not self.token:
+            return "Instagram: не подключён — публикуешь вручную"
+        self.db.set("ig_account_src", "")  # перепроверяем по-настоящему
+        try:
+            me = self._req("GET", "me", fields="user_id,username,account_type")
+        except IGError as e:
+            return f"Instagram: ⚠️ токен не работает: {e}"
+        acc = str(me.get("user_id") or me.get("id"))
+        self.db.set("ig_account_id", acc)
+        self.db.set("ig_account_src", self.token[-16:])
+        line = f"Instagram: подключён @{me.get('username')} (аккаунт {acc}, тип {me.get('account_type') or '?'})"
+        if self.cfg.ig_user_id and self.cfg.ig_user_id != acc:
+            line += f"; в IG_USER_ID стоит {self.cfg.ig_user_id} — неверный номер, использую {acc}"
+        if not self.cfg.public_base_url:
+            line += "; ⚠️ нет PUBLIC_BASE_URL — Instagram не сможет скачать видео"
+        return line
 
     def _url(self, path: str) -> str:
         return f"{HOST}/{self.cfg.ig_graph_version}/{path.lstrip('/')}"
@@ -120,7 +164,7 @@ class Instagram:
         container = post["ig_container_id"]
         if not container:
             container = self._req(
-                "POST", f"{self.cfg.ig_user_id}/media",
+                "POST", f"{self.account_id}/media",
                 media_type="REELS",
                 video_url=self.media_url(post["media_token"], "mp4"),
                 cover_url=self.media_url(post["media_token"], "jpg"),
@@ -149,7 +193,7 @@ class Instagram:
             self.sleep(poll_s)
             waited += poll_s
 
-        media_id = self._req("POST", f"{self.cfg.ig_user_id}/media_publish", creation_id=container).get("id")
+        media_id = self._req("POST", f"{self.account_id}/media_publish", creation_id=container).get("id")
         if not media_id:
             raise IGError("Instagram не вернул id опубликованного ролика")
         # Сохраняем сразу: даже если дальше что-то упадёт, ролик не опубликуется второй раз.
@@ -158,7 +202,7 @@ class Instagram:
 
     def _find_published(self, caption: str) -> str | None:
         """Ищет среди последних роликов профиля тот, что с нашим текстом."""
-        items = self._req("GET", f"{self.cfg.ig_user_id}/media", fields="id,caption", limit=15).get("data", [])
+        items = self._req("GET", f"{self.account_id}/media", fields="id,caption", limit=15).get("data", [])
         want = " ".join(caption.split())
         for it in items:
             if " ".join((it.get("caption") or "").split()) == want:

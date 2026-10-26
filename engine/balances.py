@@ -143,13 +143,81 @@ def recent_errors(db: DB) -> list[str]:
     return out
 
 
+def probe_text_key(base: str, key: str, model: str) -> tuple[str, bool]:
+    """Пробный запрос на 1 токен: жив ли ключ и не кончился ли лимит. (текст, исправен)."""
+    from .llm import KEY_TROUBLE, MODEL_TROUBLE
+    try:
+        r = requests.post(f"{_root(base)}/v1/chat/completions", timeout=40,
+                          headers={"Authorization": f"Bearer {key}"},
+                          json={"model": model, "max_tokens": 1,
+                                "messages": [{"role": "user", "content": "ok"}]})
+    except requests.RequestException as e:
+        return f"не ответил ({type(e).__name__})", True
+    if r.status_code == 200:
+        return "✅ работает", True
+    try:
+        err = r.json().get("error")
+        msg = err.get("message") if isinstance(err, dict) else str(err or r.text)
+    except ValueError:
+        msg = r.text
+    msg = f"HTTP {r.status_code}: {str(msg)[:140]}"
+    if KEY_TROUBLE.search(msg):
+        return f"❌ исчерпан или отключён ({msg})", False
+    if MODEL_TROUBLE.search(msg):
+        return f"✅ ключ принят (модель {model} недоступна: {msg})", True
+    return f"⚠️ {msg}", True
+
+
+def probe_image_key(base: str, key: str) -> tuple[str, bool]:
+    """Для ключей картинок дёшево проверить можно только, принят ли ключ."""
+    try:
+        r = requests.get(f"{_root(base)}/v1/models", headers={"Authorization": f"Bearer {key}"}, timeout=30)
+    except requests.RequestException as e:
+        return f"не ответил ({type(e).__name__})", True
+    if r.status_code in (401, 403):
+        return f"❌ ключ не принят (HTTP {r.status_code})", False
+    return "✅ ключ принят (остаток без генерации не проверить — при исчерпании переключусь сам)", True
+
+
+def key_lines(cfg: Config, ai) -> tuple[list[str], list[str]]:
+    """Строки по каждому ключу каждого посредника и предупреждения."""
+    from datetime import datetime
+    from .llm import KeyPool
+    lines, warns = [], []
+    groups = (
+        ("gemini", "SaintStore" if "saint" in cfg.gemini_base_url else "Gemini-посредник", cfg.gemini_base_url, "text"),
+        ("openai", "AI STAR" if "starimg" in cfg.openai_base_url else "OpenAI-посредник", cfg.openai_base_url, "image"),
+        ("image", "Посредник картинок", cfg.image_api_base_url, "image"),
+    )
+    for name, label, base, kind in groups:
+        pool = ai.pools[name] if ai is not None else None
+        keys = pool.keys if pool else [k for k in [getattr(cfg, f"{name}_api_key", "")] if k]
+        if not keys or not base:
+            continue
+        current = getattr(cfg, f"{name}_api_key", "")
+        ok_count = 0
+        lines.append(f"{label} — ключей: {len(keys)}")
+        for i, key in enumerate(keys, 1):
+            if kind == "text":
+                text, ok = probe_text_key(base, key, cfg.gemini_text_model)
+            else:
+                text, ok = probe_image_key(base, key)
+            if pool and not pool.usable(key) and ok:
+                text += f"; отложен до {datetime.fromtimestamp(pool.bad_until(key)):%d.%m %H:%M} после ошибки"
+            ok_count += ok
+            mark = " ← сейчас" if key == current else ""
+            bal = gateway("", base, key, cfg.balance_warn_usd)
+            extra = f"; {bal.text}" if bal and "≈ $" in bal.text else ""
+            lines.append(f"  {i}. {KeyPool.tail(key)}: {text}{extra}{mark}")
+        if ok_count == 0:
+            warns.append(f"{label}: ни один ключ не работает — генерация остановится")
+        elif ok_count == 1 and len(keys) > 1:
+            warns.append(f"{label}: остался один рабочий ключ из {len(keys)} — пора купить запасной")
+    return lines, warns
+
+
 def collect(cfg: Config, db: DB) -> list[Balance]:
     items = [
-        gateway("SaintStore (тексты)" if "saint" in cfg.gemini_base_url else "Посредник Gemini",
-                cfg.gemini_base_url, cfg.gemini_api_key, cfg.balance_warn_usd),
-        gateway("AI STAR (картинки)" if "starimg" in cfg.openai_base_url else "Посредник OpenAI",
-                cfg.openai_base_url, cfg.openai_api_key, cfg.balance_warn_usd),
-        gateway("Посредник картинок", cfg.image_api_base_url, cfg.image_api_key, cfg.balance_warn_usd),
         elevenlabs(cfg),
         tavily(cfg),
     ]
@@ -161,21 +229,25 @@ def collect(cfg: Config, db: DB) -> list[Balance]:
     return out
 
 
-def report(cfg: Config, db: DB) -> str:
-    lines = ["Балансы и лимиты:"]
+def report(cfg: Config, db: DB, ai=None) -> str:
+    lines = ["Ключи нейросетей:"]
+    klines, kwarns = key_lines(cfg, ai)
+    lines += klines or ["  ключи не заданы"]
+    lines.append("\nДругие сервисы:")
     for b in collect(cfg, db):
         lines.append(f"{'⚠️' if b.warn else '•'} {b.name}: {b.text}")
     errs = recent_errors(db)
-    if errs:
-        lines.append("\nПохоже на нехватку средств или лимит:")
-        lines += [f"⚠️ {e}" for e in errs]
-    lines.append("\nКаждый день проверяю сам и пишу, только когда пора пополнить.")
+    if errs or kwarns:
+        lines.append("\nВнимание:")
+        lines += [f"⚠️ {e}" for e in kwarns + errs]
+    lines.append("\nКаждый день проверяю сам и пишу, только когда пора пополнить. "
+                 "Запасные ключи — в GEMINI_API_KEYS / OPENAI_API_KEYS / IMAGE_API_KEYS через запятую.")
     return "\n".join(lines)
 
 
-def warnings(cfg: Config, db: DB) -> list[str]:
+def warnings(cfg: Config, db: DB, ai=None) -> list[str]:
     try:
-        warns = [b.warn for b in collect(cfg, db) if b.warn]
+        warns = [b.warn for b in collect(cfg, db) if b.warn] + key_lines(cfg, ai)[1]
     except Exception as e:  # noqa: BLE001 — проверка балансов не должна ронять расписание
         log.warning("balances: %s", e)
         warns = []

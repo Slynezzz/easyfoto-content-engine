@@ -78,6 +78,7 @@ class Services:
     balances_text: Callable[[], str] = lambda: "Проверка балансов недоступна"
     vk_status: Callable[[], str] = lambda: "VK: не подключён"
     yt_status: Callable[[], str] = lambda: "YouTube: не подключён"
+    ig_status: Callable[[], str] | None = None
     yt_login: Callable[[], str] | None = None
     yt_retry: Callable[[int], str] | None = None
 
@@ -754,6 +755,7 @@ class AdminBot:
         last = self.db.one("SELECT published_at, permalink FROM posts WHERE status='published' ORDER BY published_at DESC LIMIT 1")
         return "\n".join([
             f"Автопубликация: {'на паузе' if self.paused else 'включена'}",
+            self.s.ig_status() if self.s.ig_status else
             f"Instagram: {'подключён' if self.s.instagram_ready() else 'не подключён — публикуешь вручную'}",
             self.s.vk_status(),
             self.s.yt_status(),

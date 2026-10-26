@@ -152,9 +152,95 @@ def _root(url: str) -> str:
     return re.sub(r"/v1(beta)?$", "", url)
 
 
+# Ответ, по которому видно: у ключа кончились деньги/лимит или ключ отозван — пора брать запасной.
+KEY_TROUBLE = re.compile(r"HTTP (401|402|429)\b|insufficient|quota|balance|credit|exhaust|"
+                         r"limit (reached|exceeded)|out of tokens|api key not valid|invalid api key|"
+                         r"余额|额度|недостаточно|баланс|лимит", re.I)
+RATE_ONLY = re.compile(r"HTTP 429\b", re.I)
+
+
+def _split_keys(raw: str) -> list[str]:
+    return [k.strip() for k in re.split(r"[,\s;]+", raw or "") if k.strip()]
+
+
+class KeyPool:
+    """Основной ключ + запасные. Исчерпанный ключ откладывается (на 12 ч, при 429 — на 30 мин),
+    в cfg подставляется следующий рабочий. Отметки хранятся в базе движка, если она подключена."""
+
+    def __init__(self, cfg: Config, attr: str, extra_attr: str, label: str):
+        self.cfg, self.attr, self.label = cfg, attr, label
+        keys = [getattr(cfg, attr, "")] + _split_keys(getattr(cfg, extra_attr, ""))
+        self.keys = list(dict.fromkeys(k for k in keys if k))
+        self.store = None
+        self.on_switch = None
+        self._bad: dict[str, float] = {}
+
+    def __len__(self) -> int:
+        return len(self.keys)
+
+    @staticmethod
+    def tail(key: str) -> str:
+        return f"…{key[-4:]}" if key else "—"
+
+    def _skey(self, key: str) -> str:
+        return f"keybad:{self.attr}:{key[-10:]}"
+
+    def bad_until(self, key: str) -> float:
+        if self.store is not None:
+            raw = self.store.get(self._skey(key)) or ""
+            try:
+                return float(raw) if raw else 0.0
+            except ValueError:
+                return 0.0
+        return self._bad.get(key, 0.0)
+
+    def usable(self, key: str) -> bool:
+        return self.bad_until(key) <= time.time()
+
+    def working(self) -> list[str]:
+        return [k for k in self.keys if self.usable(k)]
+
+    def pick_initial(self) -> None:
+        """После перезапуска не начинать с ключа, который недавно кончился."""
+        cur = getattr(self.cfg, self.attr, "")
+        if cur and not self.usable(cur):
+            alive = self.working()
+            if alive:
+                setattr(self.cfg, self.attr, alive[0])
+
+    def switch(self, reason: str) -> bool:
+        """Откладывает текущий ключ и подставляет следующий рабочий. False — запасных нет."""
+        cur = getattr(self.cfg, self.attr, "")
+        if not cur or cur not in self.keys:
+            return False
+        pause = 1800 if RATE_ONLY.search(reason) and not re.search(r"quota|balance|insufficient|credit", reason, re.I) \
+            else 12 * 3600
+        until = time.time() + pause
+        if self.store is not None:
+            self.store.set(self._skey(cur), str(until))
+        self._bad[cur] = until
+        alive = [k for k in self.working() if k != cur]
+        if not alive:
+            if self.on_switch:
+                self.on_switch(f"⚠️ {self.label}: ключ {self.tail(cur)} не работает ({reason[:150]}), "
+                               "запасных рабочих ключей нет — пополни баланс или добавь ключ.")
+            return False
+        setattr(self.cfg, self.attr, alive[0])
+        log.warning("%s: ключ %s отложен, теперь %s", self.label, self.tail(cur), self.tail(alive[0]))
+        if self.on_switch:
+            self.on_switch(f"🔑 {self.label}: ключ {self.tail(cur)} исчерпан или отключён ({reason[:150]}) — "
+                           f"переключился на {self.tail(alive[0])}. Рабочих ключей осталось: {len(alive)}.")
+        return True
+
+
 class AI:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        self.pools = {
+            "gemini": KeyPool(cfg, "gemini_api_key", "gemini_api_keys", "Ключи Gemini-посредника"),
+            "openai": KeyPool(cfg, "openai_api_key", "openai_api_keys", "Ключи OpenAI-посредника"),
+            "image": KeyPool(cfg, "image_api_key", "image_api_keys", "Ключи для картинок"),
+        }
         # Формат запросов к Gemini: native (как у Google) или openai (как у OpenAI).
         # auto — определяется при первом запросе и запоминается до перезапуска.
         style = (getattr(cfg, "gemini_api_style", "") or "auto").lower()
@@ -162,6 +248,18 @@ class AI:
         # Рабочие текстовые модели. Если заданная недоступна у посредника, движок сам
         # подберёт другую из его списка и запомнит её до перезапуска.
         self.models = {"gemini": cfg.gemini_text_model, "openai": cfg.openai_text_model}
+
+    def attach(self, store=None, notify=None) -> None:
+        """Подключает базу (помнить исчерпанные ключи между перезапусками) и уведомления владельцу."""
+        for pool in self.pools.values():
+            pool.store, pool.on_switch = store, notify
+            pool.pick_initial()
+
+    def _pool_for_key(self, key: str) -> KeyPool | None:
+        return next((p for p in self.pools.values() if key and key in p.keys), None)
+
+    def _rotate(self, provider: str, err: Exception) -> bool:
+        return bool(KEY_TROUBLE.search(str(err))) and self.pools[provider].switch(str(err))
 
     # ------------------------------------------------------------ адреса
     @property
@@ -210,17 +308,18 @@ class AI:
         if model:
             return self._model_json(model, system, prompt, images or [], temperature)
         errors = []
-        if self.cfg.gemini_api_key:
-            try:
-                return self._gemini_json(system, prompt, images or [], temperature)
-            except AIError as e:
-                errors.append(f"gemini: {e}")
-                log.warning("Gemini text failed: %s", e)
-        if self.cfg.openai_api_key:
-            try:
-                return self._openai_json(system, prompt, images or [], temperature)
-            except AIError as e:
-                errors.append(f"openai: {e}")
+        for provider, call in (("gemini", self._gemini_json), ("openai", self._openai_json)):
+            for _ in range(max(1, len(self.pools[provider]))):
+                if not getattr(self.cfg, f"{provider}_api_key"):
+                    break
+                try:
+                    return call(system, prompt, images or [], temperature)
+                except AIError as e:
+                    if self._rotate(provider, e):
+                        continue   # кончился ключ — тот же запрос с запасным
+                    errors.append(f"{provider}: {e}")
+                    log.warning("%s text failed: %s", provider, e)
+                    break
         raise AIError("; ".join(errors) or "не задан ни GEMINI_API_KEY, ни OPENAI_API_KEY")
 
     def _with_model(self, provider: str, call):
@@ -488,7 +587,15 @@ class AI:
                 continue
             except AIError as e:
                 errors.append(f"{name}/{mode}: {str(e)[:200]}")
-                if MODEL_TROUBLE.search(str(e)) and mode == "chat":
+                pool = self._pool_for_key(key)
+                if pool and KEY_TROUBLE.search(str(e)) and pool.switch(str(e)):
+                    key = getattr(self.cfg, pool.attr)
+                    try:  # тот же путь с запасным ключом
+                        res = self._image_via(mode, base, key, model, prompt, refs)
+                    except AIError as e2:
+                        errors.append(f"{name}/{mode} (запасной ключ): {str(e2)[:200]}")
+                        continue
+                elif MODEL_TROUBLE.search(str(e)) and mode == "chat":
                     alt = self._pick_image_model(base, key, exclude=model)
                     if alt:
                         try:

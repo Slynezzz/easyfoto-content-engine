@@ -273,7 +273,7 @@ class Engine:
 
     def job_balances(self) -> bool:
         """Раз в сутки: предупреждения о балансах и лимитах (молчит, если всё в порядке)."""
-        warns = balances.warnings(self.cfg, self.db)
+        warns = balances.warnings(self.cfg, self.db, self.ai)
         prev = set(filter(None, (self.db.get("balance_warned") or "").split("\n")))
         fresh = [w for w in warns if w not in prev]   # одно и то же не повторяем каждый день
         self.db.set("balance_warned", "\n".join(warns))
@@ -534,11 +534,13 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
             vk_retry=engine.vk_retry,
             vk_status=engine.vk.status,
             yt_status=engine.yt.status,
+            ig_status=engine.ig.check,
             yt_login=engine.yt.start_login,
             yt_retry=engine.yt_retry,
-            balances_text=lambda: balances.report(cfg, db),
+            balances_text=lambda: balances.report(cfg, db, ai),
         ))
         engine.bot = bot
+    ai.attach(db, engine.say)   # помнить исчерпанные ключи и сообщать о переключении
     engine.recover()
     return engine, bot
 
