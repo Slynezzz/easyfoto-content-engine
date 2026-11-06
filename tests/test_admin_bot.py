@@ -346,5 +346,35 @@ class AdminBotTests(unittest.TestCase):
         self.assertIn("▶️ включена", self.bot.status_text())
 
 
+    def test_create_flow_topic_then_platform(self):
+        tid = self.db.add_topic("news", "VK открыл новые инструменты для бизнеса", "что это значит для МСБ",
+                                "https://example.ru/n")
+        self.assertEqual(self.db.add_topic("news", "vk открыл новые инструменты для бизнеса"), tid)  # без дублей
+        self.bot.handle(msg("/create"))
+        self.assertIn("Выберите тему", self.api.texts()[-1])
+        self.bot.handle(cb(f"ct:{tid}"))
+        self.assertIn("Для какой площадки", self.api.texts()[-1])
+        made = []
+        self.bot.s.make_request = lambda t, pf: made.append((t, pf)) or 99
+        self.bot.send_for_approval = lambda pid: True
+        self.bot.handle(cb(f"cp:{tid}:tg"))
+        self.assertEqual(made, [(tid, "tg")])
+
+    def test_custom_topic_message(self):
+        self.bot.handle(cb("ct:new"))
+        self.bot.handle(msg("Почему бизнесу нужен бот в MAX"))
+        self.assertIn("Почему бизнесу нужен бот в MAX", self.api.texts()[-1])
+        t = self.db.one("SELECT * FROM topics WHERE kind='custom'")
+        self.assertEqual(t["title"], "Почему бизнесу нужен бот в MAX")
+        self.assertEqual(self.db.get("await_topic"), "0")
+
+    def test_targeted_post_skips_instagram(self):
+        pid = self._post()
+        self.db.update_post(pid, target="tg")
+        self.bot.s.instagram_ready = lambda: True
+        self.bot.handle(cb(f"ok:{pid}"))
+        self.assertEqual(self.db.post(pid)["status"], "xpost")
+
+
 if __name__ == "__main__":
     unittest.main()

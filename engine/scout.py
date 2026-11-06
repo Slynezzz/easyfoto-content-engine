@@ -53,6 +53,7 @@ TikTok, VK Клипы) для русскоязычной аудитории. П�
               "scenes": ["4–5 сцен для фото в этой теме"], "why": "почему сейчас"}}],
   "events": [{{"title": "инфоповод или мем по-русски", "date": "ГГГГ-ММ-ДД — когда это актуально",
               "scenes": ["{event_scenes_hint}"], "why": "почему зайдёт"}}],
+  "topics": [{{"kind": "news | trend | problem | trigger", "title": "тема для ролика, до 90 символов", "angle": "как подать для аудитории ниши, 1 фраза", "source": "ссылка из материалов или пусто"}}],
   "music": ["стиль фоновой музыки, который сейчас в трендах Reels и Shorts: жанр, темп (bpm), инструменты, настроение — на английском, до 150 символов"],
   "summary": "2–3 предложения для владельца аккаунта: что изменилось в трендах"
 }}
@@ -60,6 +61,9 @@ TikTok, VK Клипы) для русскоязычной аудитории. П�
 0–3 инфоповода на ближайшие 3 недели: события, вирусные мемы и тренды, к которым уместно
 сделать своё фото в тему. Без политики, трагедий, катастроф, войн, религиозных споров,
 брендов и знаменитостей; если подходящих нет — пустой список.
+6–10 тем для роликов по запросу владельца: свежие новости и инфоповоды ниши из материалов (со ссылкой),
+трендовые форматы, частые проблемы и триггеры аудитории из брифа. Только то, что подтверждается
+материалами или брифом, без выдуманных фактов.
 2–4 музыкальных стиля: только описание звучания, без названий песен, имён артистов и
 брендов — по нему нейросеть создаст свою мелодию, похожую по настроению на тренд.
 Не повторяй хуки из списка уже существующих."""
@@ -309,6 +313,7 @@ def run(cfg: Config, db: DB, ai: AI, today: date | None = None, now: datetime | 
     pb["trends_updated_at"] = now.isoformat(timespec="seconds")
     pbm.save(cfg.playbook_path, pb)
     db.set("scout_last", now.isoformat(timespec="seconds"))
+    n_topics = save_topics(db, res)
 
     parts = [f"🔎 Разведка трендов ({method})"]
     if no_search:
@@ -331,6 +336,27 @@ def run(cfg: Config, db: DB, ai: AI, today: date | None = None, now: datetime | 
         parts.append("Приёмы для сценариста:\n" + "\n".join(f"  — {n}" for n in pb["trend_notes"]))
     if removed:
         parts.append(f"Убрал не сработавшие трендовые варианты: {len(removed)}.")
+    if n_topics:
+        parts.append(f"Тем для роликов по запросу: {n_topics}. Выбрать тему и площадку — /create")
     if sources:
         parts.append("Источники:\n" + "\n".join(f"  • {s['title']} — {s['uri']}" for s in sources[:6]))
     return "\n\n".join(parts)
+
+
+def save_topics(db: DB, res: dict) -> int:
+    """Темы для роликов по запросу: новости, тренды, проблемы аудитории, инфоповоды."""
+    n = 0
+    for t in (res.get("topics") or [])[:12]:
+        if not isinstance(t, dict):
+            continue
+        kind = str(t.get("kind") or "trend").split("|")[0].strip().lower()
+        kind = kind if kind in ("news", "trend", "problem", "trigger") else "trend"
+        src = str(t.get("source") or "")
+        if db.add_topic(kind, str(t.get("title") or ""), str(t.get("angle") or ""),
+                        src if src.startswith("http") else ""):
+            n += 1
+    for e in (res.get("events") or [])[:5]:
+        if isinstance(e, dict) and e.get("title"):
+            if db.add_topic("event", f"{e.get('date', '')} — {e['title']}".strip(" —"), str(e.get("note") or "")):
+                n += 1
+    return n

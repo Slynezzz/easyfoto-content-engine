@@ -15,6 +15,7 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 from . import brief, funnel, images, music, musicgen
+from . import platforms
 from . import playbook as pbm
 from .config import Config
 from .db import DB
@@ -42,6 +43,7 @@ HELP = """Команды:
 /funnel — сколько пришло в бот по ссылкам, сделали фото и купили (/funnel 7 — за неделю)
 /links — ссылки на бот с меткой для шапки каждой соцсети
 /analyze — пересчитать плейбук по статистике
+/create — создать ролик: выбрать тему (новость, тренд, инфоповод, проблему или свою) и площадку
 /status — состояние и кнопки: остановить/включить генерацию и публикации
 /stop и /run — остановить или включить генерацию роликов (тренды и отчёты работают всегда)
 /pause и /resume — остановить или включить автопубликацию
@@ -63,7 +65,8 @@ GEN_OFF = ("⏸ Генерация остановлена: новые ролик
            "Тренды, статистика и еженедельные отчёты продолжают собираться. Уже одобренные ролики выходят "
            "по расписанию (остановить их — «Пауза публикаций»).")
 GEN_ON = "▶️ Генерация включена: ролики снова собираются по расписанию."
-MENU = [{"command": "status", "description": "Состояние и кнопки старт/стоп"},
+MENU = [{"command": "create", "description": "Создать ролик: тема → площадка"},
+        {"command": "status", "description": "Состояние и кнопки старт/стоп"},
         {"command": "stop", "description": "Остановить генерацию роликов"},
         {"command": "run", "description": "Включить генерацию роликов"},
         {"command": "make", "description": "Собрать ролик сейчас"},
@@ -90,6 +93,8 @@ class Services:
     on_approved: Callable[[int, bool], str] | None = None   # поставить публикации на других площадках
     vk_connect: Callable[[str], str] | None = None          # сохранить вход в VK из адреса страницы
     vk_login: Callable[[], str] | None = None               # ссылка входа VK ID
+    make_request: Callable[[int, str], int] | None = None   # ролик по теме для площадки
+    auto_plan: Callable[[], bool] = lambda: False
     vk_retry: Callable[[int], str] | None = None
     balances_text: Callable[[], str] = lambda: "Проверка балансов недоступна"
     vk_status: Callable[[], str] = lambda: "VK: не подключён"
@@ -176,6 +181,7 @@ class AdminBot:
         post = self.db.post(post_id)
         plan = json.loads(post["script_json"])
         tags = " · ".join(x for x in (
+            f"для: {platforms.label(post['target'])}" if post["target"] else "",
             FORMAT_RU.get(post["format"], post["format"]),
             f"тема: {post['theme']}",
             f"хук: {post['hook_id']}",
@@ -282,6 +288,11 @@ class AdminBot:
             except Exception as e:  # noqa: BLE001
                 self.say(f"⚠️ VK не подключился: {e}")
             return
+        if text and not text.startswith("/") and self.db.get("await_topic") == "1":
+            self.db.set("await_topic", "0")
+            tid = self.db.add_topic("custom", text[:200])
+            self.say(f"Тема: «{text[:200]}»\nДля какой площадки сделать ролик?", self.platform_keyboard(tid))
+            return
         if "oauth.vk." in text and "/authorize" in text:
             self.say("Это ссылка для входа, её нужно открыть в браузере. После того как разрешишь доступ, "
                      "VK покажет почти пустую страницу — пришли адрес именно этой страницы "
@@ -348,9 +359,9 @@ class AdminBot:
             self.say(f"⚠️ Кадр не получился.\n{str(e)[:1500]}")
             return
         try:
-            self.api.send_photo(self.admin, path, f"✅ Генерация работает: {route}, {secs:.0f} с.\n"
-                                                  "Похож? Если сходство слабое — добавь референсов «реф» "
-                                                  "с разных ракурсов при хорошем свете.")
+            tip = ("Это иллюстрация по описанию — так будут выглядеть кадры роликов." if images.illustration_mode(self.cfg)
+                   else "Похож? Если сходство слабое — добавь референсов «реф» с разных ракурсов при хорошем свете.")
+            self.api.send_photo(self.admin, path, f"✅ Генерация работает: {route}, {secs:.0f} с.\n{tip}")
         finally:
             Path(path).unlink(missing_ok=True)
 
@@ -634,6 +645,8 @@ class AdminBot:
                 if not self.send_for_approval(post_id):
                     self.say(f"Ролик #{post_id} собран, отправлю его чуть позже.")
             self.run_bg(job)
+        elif cmd in ("/create", "/new"):
+            self.say(*self.create_menu())
         elif cmd == "/occasions":
             self.say(self.s.occasions_text())
         elif cmd == "/make" and self.gen_paused:
@@ -675,7 +688,7 @@ class AdminBot:
             self.say("Запрашиваю списки моделей у посредников…")
             self.run_bg(lambda: self.say(self.s.models_report()))
         elif cmd == "/imgtest":
-            self.say("Генерирую пробный кадр по твоим фото, это 20–90 секунд…")
+            self.say("Генерирую пробный кадр, это 20–120 секунд…")
             self.run_bg(self._image_test)
         elif cmd == "/trends":
             self.say("Смотрю свежие тренды Reels и Shorts, это займёт около минуты…")
@@ -776,14 +789,22 @@ class AdminBot:
     def control_keyboard(self) -> dict:
         gen = ("▶️ Включить генерацию", "ctl:gen_on") if self.gen_paused else ("⏸ Остановить генерацию", "ctl:gen_off")
         pub = ("▶️ Включить публикации", "ctl:pub_on") if self.paused else ("⏸ Пауза публикаций", "ctl:pub_off")
-        return {"inline_keyboard": [[{"text": gen[0], "callback_data": gen[1]}],
-                                    [{"text": pub[0], "callback_data": pub[1]}]]}
+        auto = (("🔁 Ролики по расписанию: выключить", "ctl:auto_off") if self.s.auto_plan()
+                else ("🔁 Ролики по расписанию: включить", "ctl:auto_on"))
+        return {"inline_keyboard": [[{"text": "✨ Создать ролик по теме", "callback_data": "ct:menu"}],
+                                    [{"text": gen[0], "callback_data": gen[1]}],
+                                    [{"text": pub[0], "callback_data": pub[1]}],
+                                    [{"text": auto[0], "callback_data": auto[1]}]]}
 
     def on_control_callback(self, cq: dict, data: str) -> None:
         what = data.split(":", 1)[1]
         key, value, text = {"gen_off": ("gen_paused", "1", GEN_OFF), "gen_on": ("gen_paused", "0", GEN_ON),
                             "pub_off": ("paused", "1", "⏸ Автопубликация на паузе."),
-                            "pub_on": ("paused", "0", "▶️ Автопубликация включена.")}.get(what, (None, None, ""))
+                            "pub_on": ("paused", "0", "▶️ Автопубликация включена."),
+                            "auto_on": ("auto_plan", "1", "🔁 Ролики по расписанию включены: каждый день утром "
+                                        "соберу ролики на свободные часы публикаций."),
+                            "auto_off": ("auto_plan", "0", "🔁 Ролики по расписанию выключены: ролики — только по "
+                                         "запросу (/create).")}.get(what, (None, None, ""))
         if not key:
             self.api.answer_callback(cq["id"])
             return
@@ -792,6 +813,74 @@ class AdminBot:
         msg_id = (cq.get("message") or {}).get("message_id")
         self.api.edit_markup(self.admin, msg_id, self.control_keyboard())
         self.say(text)
+
+    # ---------------------------------------------------- ролик по запросу
+    KIND_ICON = {"news": "📰", "trend": "📈", "problem": "🧩", "trigger": "⚡", "event": "📅", "custom": "✍️"}
+
+    def create_menu(self) -> tuple[str, dict]:
+        rows = []
+        for t in self.db.topics(8):
+            icon = self.KIND_ICON.get(t["kind"], "•")
+            used = " ✓" if t["used_at"] else ""
+            rows.append([{"text": f"{icon} {t['title'][:56]}{used}", "callback_data": f"ct:{t['id']}"}])
+        rows.append([{"text": "✍️ Своя тема или задача", "callback_data": "ct:new"}])
+        rows.append([{"text": "🔎 Обновить тренды и новости", "callback_data": "ct:scout"}])
+        text = ("Выберите тему ролика — новость, тренд, инфоповод или проблему аудитории (✓ — уже делали ролик), "
+                "либо напишите свою. Затем выберете площадку.")
+        if len(rows) == 2:
+            text = "Тем пока нет: обновите тренды и новости или напишите свою тему."
+        return text, {"inline_keyboard": rows}
+
+    def platform_keyboard(self, topic_id: int | None) -> dict:
+        rows = [[{"text": f"{p['emoji']} {p['title']}", "callback_data": f"cp:{topic_id}:{pid}"}]
+                for pid, p in platforms.PLATFORMS.items()]
+        return {"inline_keyboard": rows}
+
+    def on_create_callback(self, cq: dict, data: str) -> None:
+        self.api.answer_callback(cq["id"])
+        if data == "ct:menu":
+            self.say(*self.create_menu())
+            return
+        if data == "ct:new":
+            self.db.set("await_topic", "1")
+            self.say("Напишите тему или задачу одним сообщением: например, «почему бизнесу нужен бот в MAX» "
+                     "или ссылку на новость с короткой припиской.")
+            return
+        if data == "ct:scout":
+            self.say("Собираю свежие тренды и новости ниши, это около минуты…")
+            self.run_bg(lambda: (self.say(self.s.scout_trends()), self.say(*self.create_menu())))
+            return
+        if data.startswith("ct:"):
+            raw = data[3:]
+            t = self.db.topic(int(raw)) if raw.isdigit() else None
+            if not t:
+                self.say("Тема не найдена — откройте /create заново.")
+                return
+            detail = f"\n{t['angle']}" if t["angle"] else ""
+            src = f"\nИсточник: {t['url']}" if t["url"] else ""
+            self.say(f"Тема: «{t['title']}»{detail}{src}\n\nДля какой площадки сделать ролик?",
+                     self.platform_keyboard(t["id"]))
+            return
+        _, raw, pid = data.split(":", 2)
+        if not raw.isdigit() or pid not in platforms.PLATFORMS:
+            return
+        if self.gen_paused:
+            self.say("⏸ Генерация остановлена — включите её в /status, затем повторите.", self.control_keyboard())
+            return
+        if not self.s.make_request:
+            self.say("Создание по запросу недоступно.")
+            return
+        self.say(f"Собираю ролик для {platforms.label(pid)}: сценарий, новые кадры и музыка — это 3–6 минут…")
+
+        def job():
+            try:
+                post_id = self.s.make_request(int(raw), pid)
+            except Exception as e:  # noqa: BLE001
+                self.say(f"⚠️ Не получилось: {e}")
+                return
+            if not self.send_for_approval(post_id):
+                self.say(f"Ролик #{post_id} собран, отправлю его чуть позже.")
+        self.run_bg(job)
 
     def set_menu(self) -> None:
         """Список команд в кнопке «Меню» Telegram — чтобы управление было под рукой."""
@@ -816,6 +905,7 @@ class AdminBot:
             f"Генерация роликов: {'⏸ остановлена' if self.gen_paused else '▶️ включена'} "
             "(тренды, статистика и отчёты работают всегда)",
             f"Автопубликация: {'⏸ на паузе' if self.paused else '▶️ включена'}",
+            f"Ролики: {'по расписанию каждый день' if self.s.auto_plan() else 'только по запросу (/create)'}",
             self.s.ig_status() if self.s.ig_status else
             f"Instagram: {'подключён' if self.s.instagram_ready() else 'не подключён — публикуешь вручную'}",
             self.s.vk_status(),
@@ -848,6 +938,9 @@ class AdminBot:
             return
         if data.startswith("ctl:"):
             self.on_control_callback(cq, data)
+            return
+        if data.startswith(("ct:", "cp:")):
+            self.on_create_callback(cq, data)
             return
         action, _, raw_id = data.partition(":")
         if action == "noop" or not raw_id.isdigit():
@@ -891,6 +984,12 @@ class AdminBot:
                     other = f"⚠️ Другие площадки: {e}"
             if other:
                 self.say(other)
+            target = self.db.post(post_id)["target"]
+            if target and target != "ig":  # ролик для другой площадки — в Instagram не идёт
+                self.db.update_post(post_id, status="xpost")
+                self.api.answer_callback(cq["id"], "Одобрено")
+                mark(f"✅ {platforms.label(target)}")
+                return
             if not self.s.instagram_ready():
                 self.db.update_post(post_id, status="manual")
                 self.api.answer_callback(cq["id"], "Готово к ручной публикации")
@@ -925,7 +1024,14 @@ class AdminBot:
                 self.say("Собираю другой вариант…")
 
                 def job():
-                    new_id = self._make()
+                    if old["topic_id"] and old["target"] and self.s.make_request:
+                        try:
+                            new_id = self.s.make_request(old["topic_id"], old["target"])
+                        except Exception as e:  # noqa: BLE001
+                            self.say(f"⚠️ Не получилось: {e}")
+                            return
+                    else:
+                        new_id = self._make()
                     if new_id is None:
                         return
                     if old["scheduled_for"]:

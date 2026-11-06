@@ -48,7 +48,7 @@ def timing_hint(day, publish) -> str:
 
 def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
             rng: random.Random | None = None, scheduled_for: str | None = None,
-            occasion: occ_mod.Occasion | None = None) -> int:
+            occasion: occ_mod.Occasion | None = None, request: dict | None = None) -> int:
     """Собирает ролик и сохраняет пост со статусом 'rendered'. Возвращает id поста.
 
     occasion — праздник или инфоповод: тогда кадры генерируются заново из твоих
@@ -73,7 +73,7 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
     plan: planner.Plan | None = None
     brief_text = brief.load(cfg)
     has_refs = bool(images.pick_refs(db)) or images.illustration_mode(cfg)  # иллюстрациям лицо не нужно
-    want_new = bool(occasion) or cfg.image_source == "generate" or (
+    want_new = bool(occasion) or bool(request) or cfg.image_source == "generate" or (
         cfg.image_source == "mixed" and rng.random() < cfg.generate_share)
     if occasion and not has_refs:
         raise ProduceError("для ролика к поводу нужны твои фото: пришли их в админ-бот с подписью «реф» или «до»")
@@ -93,13 +93,13 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
         notes = [f"{r['title'] or 'образ без описания'} — {r['description'] or ''}".strip(" —") for r in rows]
         return rows, planner.plan(ai, pb, choice, len(rows), photo_notes=notes,
                                   gender=cfg.persona_gender, bot=cfg.bot_username, brief_text=brief_text,
-                                  copy_model=cfg.copy_model, nic=niche.load(cfg.niche))
+                                  copy_model=cfg.copy_model, nic=niche.load(cfg.niche), request=request)
 
     def from_generation():
         k = max(MIN_PHOTOS, min(n, cfg.generate_photos))
         gplan = planner.plan(ai, pb, choice, k, generate_scenes=True,
                              gender=cfg.persona_gender, bot=cfg.bot_username, brief_text=brief_text,
-                             copy_model=cfg.copy_model, nic=niche.load(cfg.niche))
+                             copy_model=cfg.copy_model, nic=niche.load(cfg.niche), request=request)
         ids, errors = [], []
         for scene in gplan.scenes:
             try:
@@ -164,6 +164,7 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
     db.mark_used(asset_ids)
     plan.choice = dataclasses.asdict(choice)
     return db.create_post(
+        target=(request or {}).get("platform"), topic_id=(request or {}).get("topic_id"),
         status="rendered", format=choice.format, hook_id=choice.hook_id, theme=choice.theme,
         style=choice.style, audience=choice.audience,
         explore=int(choice.explore), script_json=plan.to_json(), asset_ids_json=asset_ids,

@@ -32,7 +32,7 @@ from .tgchannel import TGChannel, TGChannelError
 log = logging.getLogger("engine")
 
 SLOT_FMT = "%Y-%m-%d %H:%M"
-LIVE = ("rendered", "sending", "pending", "approved", "publishing", "published", "manual", "failed")
+LIVE = ("rendered", "sending", "pending", "approved", "publishing", "published", "manual", "failed", "xpost")
 
 
 class Engine:
@@ -83,12 +83,28 @@ class Engine:
     def gen_paused(self) -> bool:
         return self.db.get("gen_paused") == "1"
 
-    def make_one(self, scheduled_for: str | None = None, occasion=None) -> int:
+    def auto_plan(self) -> bool:
+        """Ролики по расписанию: по умолчанию выключено — ролики делаются по запросу (/create)."""
+        return self.db.get("auto_plan", "1" if self.cfg.auto_plan else "0") == "1"
+
+    def make_one(self, scheduled_for: str | None = None, occasion=None, request: dict | None = None) -> int:
         if self.gen_paused():
             raise RuntimeError("генерация остановлена — включить: /run или кнопка в /status")
         pb = pbm.load(self.cfg.playbook_path)
         return produce(self.cfg, self.db, self.ai, pb, self.now().date(), self.rng, scheduled_for,
-                       occasion=occasion)
+                       occasion=occasion, request=request)
+
+    def make_request(self, topic_id: int, platform: str) -> int:
+        """Ролик по выбранной теме для выбранной площадки."""
+        t = self.db.topic(topic_id)
+        if not t:
+            raise ValueError("тема не найдена — откройте /create заново")
+        req = {"title": t["title"], "angle": t["angle"] or "", "url": t["url"] or "",
+               "platform": platform, "topic_id": t["id"]}
+        post_id = self.make_one(request=req)
+        self.db.x("UPDATE topics SET used_at=? WHERE id=?",
+                  (self.now().astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds"), t["id"]))
+        return post_id
 
     # ------------------------------------------------------------- поводы
     def _events(self) -> list[dict]:
@@ -161,6 +177,8 @@ class Engine:
 
     def on_approved(self, post_id: int, now: bool) -> str:
         """Ставит одобренный ролик в очередь VK и YouTube. Возвращает строку для владельца."""
+        post = self.db.post(post_id)
+        target = post["target"] if "target" in post.keys() else None
         platforms = []
         if self.vk.can_autopublish():
             platforms.append("vk")
@@ -170,9 +188,13 @@ class Engine:
             platforms.append("yt")
         if self.tg.ready():
             platforms.append("tg")
+        if target:  # ролик сделан под одну площадку — только туда
+            want = {"vk": ("vk", "vk_manual"), "yt": ("yt",), "tg": ("tg",)}.get(target, ())
+            platforms = [p for p in platforms if p in want]
+            if not platforms and target != "ig":
+                return f"⚠️ {target}: площадка не подключена — ролик не опубликуется сам (см. /status)."
         if not platforms:
             return ""
-        post = self.db.post(post_id)
         if now:
             when = self.now()
         elif post["scheduled_for"]:
@@ -331,7 +353,7 @@ class Engine:
     def job_plan(self) -> int:
         """Утром собирает ролики на сегодняшние свободные слоты и шлёт на одобрение."""
         now = self.now()
-        if now.hour < self.cfg.plan_hour or self.gen_paused():
+        if now.hour < self.cfg.plan_hour or self.gen_paused() or not self.auto_plan():
             return 0
         made = 0
         occ_today = self._occasion_posts_today()
@@ -432,10 +454,18 @@ class Engine:
         if not self.cfg.gemini_api_key:
             return False
         now = self.now()
-        if self.db.get("scout_last"):
+        last = self.db.get("scout_last")
+        if last and self.cfg.scout_days >= 7:
             if now.weekday() != 0 or now.hour < 9:
                 return False
             if not self._once(f"scout:{now:%G-W%V}"):
+                return False
+        elif last:  # чаще раза в неделю: каждые SCOUT_DAYS дней с 9:00
+            try:
+                prev = datetime.fromisoformat(last)
+            except ValueError:
+                prev = None
+            if now.hour < 9 or (prev and (now - prev) < timedelta(days=self.cfg.scout_days, hours=-2)):
                 return False
         report = scout.run(self.cfg, self.db, self.ai, today=now.date())
         if report.startswith("⚠️"):
@@ -469,7 +499,7 @@ class Engine:
         cutoff = (self.now() - timedelta(days=keep_days)).astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
         rows = self.db.q(
             "SELECT id, video_path, cover_path FROM posts WHERE video_path IS NOT NULL AND ("
-            "(status='rejected') OR (status IN ('published','manual') AND COALESCE(published_at, created_at) < ?)) "
+            "(status='rejected') OR (status IN ('published','manual','xpost') AND COALESCE(published_at, created_at) < ?)) "
             "AND id NOT IN (SELECT post_id FROM crossposts WHERE status IN ('queued','publishing','failed'))",
             (cutoff,))
         n = 0
@@ -551,6 +581,8 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
             scout_trends=lambda: scout.run(cfg, db, ai),
             on_approved=engine.on_approved,
             vk_connect=engine.vk.save_token,
+            make_request=engine.make_request,
+            auto_plan=engine.auto_plan,
             vk_login=engine.vk.start_login,
             vk_retry=engine.vk_retry,
             vk_status=engine.vk.status,

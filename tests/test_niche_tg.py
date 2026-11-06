@@ -122,6 +122,51 @@ class PauseAndIllustrationTests(unittest.TestCase):
         self.assertEqual(res.provider if hasattr(res, "provider") else res.mode, "generations")
 
 
+class RequestTests(unittest.TestCase):
+    def test_planner_gets_topic_and_platform_rules(self):
+        n = niche.load("expert")
+        pb = json.loads(niche.playbook_path(n).read_text(encoding="utf-8"))
+        choice = pbm.choose(pb, date(2026, 11, 6), 0.0, random.Random(1))
+        req = {"title": "Форум про ИИ для бизнеса 27.11", "angle": "что взять малому бизнесу",
+               "url": "https://ex.ru/f", "platform": "ig"}
+        prompt = planner.build_prompt(pb, choice, 5, None, True, "male", n, req)
+        self.assertIn("ЗАКАЗ ВЛАДЕЛЬЦА", prompt)
+        self.assertIn("Форум про ИИ для бизнеса 27.11", prompt)
+        self.assertIn("Хэштегов не больше 5", prompt)
+        plan = planner.Plan(choice={}, script={}, hashtags=["#a", "#b", "#c", "#d", "#e", "#f", "#g"])
+        self.assertEqual(len(planner.fit_platform(plan, req).hashtags), 5)
+        self.assertEqual(planner.fit_platform(plan, {"platform": "tg"}).hashtags, [])
+
+    def test_scout_topics_saved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DB(Path(tmp) / "e.db")
+            n = scout.save_topics(db, {"topics": [
+                {"kind": "news", "title": "Новость А", "angle": "как подать", "source": "https://a.ru"},
+                {"kind": "problem | trend", "title": "Заявки теряются ночью", "source": "не ссылка"},
+                {"title": ""}],
+                "events": [{"date": "2026-11-27", "title": "Форум"}]})
+            rows = db.topics(10)
+            db.close()
+        self.assertEqual(n, 3)
+        kinds = {r["title"]: (r["kind"], r["url"]) for r in rows}
+        self.assertEqual(kinds["Новость А"], ("news", "https://a.ru"))
+        self.assertEqual(kinds["Заявки теряются ночью"], ("problem", ""))
+        self.assertEqual(kinds["2026-11-27 — Форум"][0], "event")
+
+    def test_auto_plan_off_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config(data_dir=Path(tmp))
+            cfg.ensure_dirs()
+            db = DB(cfg.db_path)
+            engine = Engine(cfg, db, ai=None, ig=FakeIG(db), bot=FakeBot(),
+                            now=Clock(datetime(2026, 11, 6, 10, 0, tzinfo=TZ)))
+            self.assertFalse(engine.auto_plan())
+            self.assertEqual(engine.job_plan(), 0)
+            db.set("auto_plan", "1")
+            self.assertTrue(engine.auto_plan())
+            db.close()
+
+
 class TGApi:
     def __init__(self, fail=None):
         self.fail, self.videos, self.texts = fail, [], []

@@ -39,6 +39,10 @@ class Config:
     gemini_api_style: str = field(default_factory=lambda: _env("GEMINI_API_STYLE", "auto"))
     gemini_text_model: str = field(default_factory=lambda: _env("GEMINI_TEXT_MODEL", "gemini-2.5-flash"))
     gemini_image_model: str = field(default_factory=lambda: _env("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"))
+    # Собирать ролики по расписанию каждый день (1) или только по запросу из админ-бота (0, по умолчанию)
+    auto_plan: bool = field(default_factory=lambda: _env("AUTO_PLAN", "0") in ("1", "true", "yes"))
+    # Как часто разведчик собирает тренды и новости ниши, дней
+    scout_days: int = field(default_factory=lambda: _int("SCOUT_DAYS", 7))
     # Ниша аккаунта: neurophoto — продвижение Easyfotobot, expert — личный бренд эксперта (см. engine/niches)
     niche: str = field(default_factory=lambda: _env("NICHE", "neurophoto"))
     # Куда вести людей из роликов, если это не бот с метками (например, Telegram автора или сайт)

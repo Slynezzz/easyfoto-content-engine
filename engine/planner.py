@@ -11,7 +11,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass, field
 
-from . import niche
+from . import niche, platforms
 from .llm import AI, AIError
 from .playbook import Choice
 from .video.templates import Script
@@ -97,8 +97,33 @@ def _clip(text: str, limit: int) -> str:
     return text
 
 
+def fit_platform(plan_: "Plan", request: dict | None) -> "Plan":
+    """Хэштеги — не больше, чем разрешает площадка (Instagram — 5, Telegram — без них)."""
+    pl = platforms.get((request or {}).get("platform"))
+    if pl:
+        plan_.hashtags = plan_.hashtags[: pl["hashtags"]]
+    return plan_
+
+
+def request_lines(request: dict | None) -> list[str]:
+    """Заказ владельца: тема ролика и площадка, под которую пишем текст."""
+    if not request:
+        return []
+    lines = ["", "ЗАКАЗ ВЛАДЕЛЬЦА — ролик строго на эту тему, хук и тезисы раскрывают именно её:",
+             f"Тема: {request.get('title', '')}"]
+    if request.get("angle"):
+        lines.append(f"Как подать: {request['angle']}")
+    if request.get("url"):
+        lines.append(f"Источник (не выдумывай фактов сверх него и брифа): {request['url']}")
+    pl = platforms.get(request.get("platform"))
+    if pl:
+        lines.append(f"ПЛОЩАДКА: {pl['rules']}")
+    return lines
+
+
 def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None,
-                 generate_scenes: bool, gender: str, nic: dict | None = None) -> str:
+                 generate_scenes: bool, gender: str, nic: dict | None = None,
+                 request: dict | None = None) -> str:
     nic = nic or niche.load("neurophoto")
     fmt = pb["formats"][choice.format]
     hook = pb["hooks"][choice.hook_id]
@@ -134,6 +159,7 @@ def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None
     if pb.get("insights"):
         lines.append("Что мы уже знаем по статистике аккаунта:")
         lines += [f"  — {x}" for x in pb["insights"]]
+    lines += request_lines(request)
     lines.append("")
     hint = (nic.get("scenes_hint") or SCENES_HINT).format(n=n)
     lines.append(SCHEMA_HINT.format(n=n, scenes_hint=hint if generate_scenes else "",
@@ -188,24 +214,26 @@ def fallback(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None, bo
 
 def plan(ai: AI, pb: dict, choice: Choice, n: int, *, photo_notes: list[str] | None = None,
          generate_scenes: bool = False, gender: str = "male", bot: str = "Easyfotobot",
-         brief_text: str = "", copy_model: str = "", nic: dict | None = None) -> Plan:
+         brief_text: str = "", copy_model: str = "", nic: dict | None = None,
+         request: dict | None = None) -> Plan:
     nic = nic or niche.load("neurophoto")
     system = SYSTEM.format(account=nic["account"].format(bot=bot), goal=nic["goal"],
                            brief=brief_text or "(бриф не задан)",
                            rules="\n".join(f"- {r}" for r in pb.get("rules", [])))
-    prompt = build_prompt(pb, choice, n, photo_notes, generate_scenes, gender, nic)
+    prompt = build_prompt(pb, choice, n, photo_notes, generate_scenes, gender, nic, request)
     last_err: Exception | None = None
     copy_error = ""
     if copy_model:
         # тексты пишет сильная модель; если не справилась — основная, как раньше
         try:
-            return validate(ai.json(system, prompt, model=copy_model), choice, pb, n, generate_scenes, nic)
+            return fit_platform(validate(ai.json(system, prompt, model=copy_model), choice, pb, n,
+                                         generate_scenes, nic), request)
         except (AIError, ValueError, TypeError, KeyError) as e:
             copy_error = f"{copy_model}: {str(e)[:200]}"
             log.warning("copy model failed: %s", copy_error)
     for _ in range(2):
         try:
-            res = validate(ai.json(system, prompt), choice, pb, n, generate_scenes, nic)
+            res = fit_platform(validate(ai.json(system, prompt), choice, pb, n, generate_scenes, nic), request)
             res.copy_error = copy_error
             return res
         except (AIError, ValueError, TypeError, KeyError) as e:

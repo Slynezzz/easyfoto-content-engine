@@ -64,6 +64,15 @@ CREATE TABLE IF NOT EXISTS playbook_history (
     note TEXT
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- темы для роликов по запросу: новости, тренды, инфоповоды, проблемы аудитории, свои запросы
+CREATE TABLE IF NOT EXISTS topics (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,              -- news | trend | event | problem | custom
+    title TEXT NOT NULL,
+    angle TEXT, url TEXT,
+    created_at TEXT NOT NULL,
+    used_at TEXT
+);
 -- статистика роликов на других площадках (YouTube, VK)
 CREATE TABLE IF NOT EXISTS platform_metrics (
     post_id INTEGER NOT NULL REFERENCES posts(id),
@@ -113,6 +122,10 @@ class DB:
             self._conn.execute("ALTER TABLE posts ADD COLUMN style TEXT")
         if "audience" not in pcols:
             self._conn.execute("ALTER TABLE posts ADD COLUMN audience TEXT")
+        if "target" not in pcols:  # площадка, для которой сделан ролик по запросу (NULL — все подключённые)
+            self._conn.execute("ALTER TABLE posts ADD COLUMN target TEXT")
+        if "topic_id" not in pcols:
+            self._conn.execute("ALTER TABLE posts ADD COLUMN topic_id INTEGER")
         if "tg_message_id" not in cols:
             self._conn.execute("ALTER TABLE assets ADD COLUMN tg_message_id INTEGER")
 
@@ -197,6 +210,27 @@ class DB:
             return cur.rowcount == 1
 
     # ------------------------------------------------------------ metrics
+    # ------------------------------------------------------------ topics
+    def add_topic(self, kind: str, title: str, angle: str = "", url: str = "") -> int | None:
+        """Новая тема; повтор того же заголовка за последние 30 дней не добавляется."""
+        title = " ".join((title or "").split())[:200]
+        if not title:
+            return None
+        dup = self.one("SELECT id FROM topics WHERE lower(title)=lower(?) AND created_at >= datetime('now','-30 days')",
+                       (title,))
+        if dup:
+            return dup["id"]
+        return self.x("INSERT INTO topics(kind, title, angle, url, created_at) VALUES (?,?,?,?,?)",
+                      (kind, title, (angle or "")[:500], (url or "")[:500], now_iso()))
+
+    def topics(self, limit: int = 8) -> list[sqlite3.Row]:
+        """Свежие темы: сначала неиспользованные, новые выше."""
+        return self.q("SELECT * FROM topics WHERE kind != 'custom' ORDER BY used_at IS NOT NULL, id DESC LIMIT ?",
+                      (limit,))
+
+    def topic(self, topic_id: int) -> sqlite3.Row | None:
+        return self.one("SELECT * FROM topics WHERE id=?", (topic_id,))
+
     # ------------------------------------------------------------ crossposts
     def queue_crosspost(self, post_id: int, platform: str, due_at: str) -> bool:
         """Ставит публикацию в очередь; повторное одобрение не создаёт дубль."""

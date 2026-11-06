@@ -71,7 +71,7 @@ class FakeBot:
 class EngineTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.cfg = Config(data_dir=Path(self._tmp.name), publish_hours="12,19", reels_per_day=2, plan_hour=8)
+        self.cfg = Config(data_dir=Path(self._tmp.name), publish_hours="12,19", reels_per_day=2, plan_hour=8, auto_plan=True)
         self.db = DB(self.cfg.db_path)
         self.clock = Clock(datetime(2026, 10, 20, 9, 0, tzinfo=TZ))
         self.ig = FakeIG(self.db)
