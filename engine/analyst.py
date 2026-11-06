@@ -21,7 +21,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from statistics import mean
 
-from . import playbook as pbm
+from . import playbook as pbm, niche
 from .config import Config
 from .db import DB, now_iso
 from .llm import AI, AIError
@@ -35,10 +35,10 @@ WEIGHTS = {"plays": 0.40, "hold": 0.25, "engagement": 0.20, "watch": 0.15}
 USER_WINDOW_DAYS = 90  # за сколько дней берём пришедших в бот
 WEIGHTS_CONV = {"plays": 0.30, "hold": 0.20, "engagement": 0.15, "watch": 0.10, "conversion": 0.25}
 
-INSIGHT_SYSTEM = """Ты аналитик коротких видео. По таблице роликов аккаунта нейрофотографа
+INSIGHT_SYSTEM = """Ты аналитик коротких видео. По таблице роликов {account}
 сформулируй 3–6 коротких практических выводов для сценариста: какие хуки, форматы и темы
-работают, что избегать, что попробовать. Главное — какие ролики приводят людей в бот и к покупке
-(колонки «пришли в бот» и «купили»), а не только просмотры. Только то, что следует из данных; если данных мало —
+работают, что избегать, что попробовать. Главное — какие ролики приводят людей {conversion_target}
+(колонки «пришли» и «купили», если они есть), а не только просмотры. Только то, что следует из данных; если данных мало —
 так и скажи. Каждый вывод — одно предложение до 140 символов.
 Кроме того, предложи 0–3 правки брифа продукта (кому и как продавать), если данные дают
 для этого основание: например, какой сегмент аудитории или какой довод работает лучше.
@@ -184,7 +184,10 @@ def run(cfg: Config, db: DB, ai: AI | None) -> str:
     insights, summary = pb.get("insights", []), ""
     if ai is not None:
         try:
-            res = ai.json(INSIGHT_SYSTEM, _table(scored, pb), temperature=0.3)
+            nic = niche.load(cfg.niche)
+            system = INSIGHT_SYSTEM.replace("{account}", nic["analyst_account"]).replace(
+                "{conversion_target}", nic["conversion_target"])
+            res = ai.json(system, _table(scored, pb), temperature=0.3)
             got = [str(x)[:160] for x in (res.get("insights") or []) if str(x).strip()]
             if got:
                 insights = got

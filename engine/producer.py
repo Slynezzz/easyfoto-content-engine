@@ -8,7 +8,7 @@ import random
 import secrets
 from datetime import date, datetime
 
-from . import brief, images, musicgen, planner
+from . import brief, images, musicgen, niche, planner
 from . import occasions as occ_mod
 from . import playbook as pbm
 from .config import Config
@@ -93,13 +93,13 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
         notes = [f"{r['title'] or 'образ без описания'} — {r['description'] or ''}".strip(" —") for r in rows]
         return rows, planner.plan(ai, pb, choice, len(rows), photo_notes=notes,
                                   gender=cfg.persona_gender, bot=cfg.bot_username, brief_text=brief_text,
-                                  copy_model=cfg.copy_model)
+                                  copy_model=cfg.copy_model, nic=niche.load(cfg.niche))
 
     def from_generation():
         k = max(MIN_PHOTOS, min(n, cfg.generate_photos))
         gplan = planner.plan(ai, pb, choice, k, generate_scenes=True,
                              gender=cfg.persona_gender, bot=cfg.bot_username, brief_text=brief_text,
-                                  copy_model=cfg.copy_model)
+                             copy_model=cfg.copy_model, nic=niche.load(cfg.niche))
         ids, errors = [], []
         for scene in gplan.scenes:
             try:

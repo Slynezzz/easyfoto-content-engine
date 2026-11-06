@@ -39,6 +39,12 @@ class Config:
     gemini_api_style: str = field(default_factory=lambda: _env("GEMINI_API_STYLE", "auto"))
     gemini_text_model: str = field(default_factory=lambda: _env("GEMINI_TEXT_MODEL", "gemini-2.5-flash"))
     gemini_image_model: str = field(default_factory=lambda: _env("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"))
+    # Ниша аккаунта: neurophoto — продвижение Easyfotobot, expert — личный бренд эксперта (см. engine/niches)
+    niche: str = field(default_factory=lambda: _env("NICHE", "neurophoto"))
+    # Куда вести людей из роликов, если это не бот с метками (например, Telegram автора или сайт)
+    cta_url: str = field(default_factory=lambda: _env("CTA_URL"))
+    # Telegram-канал, куда публиковать ролики (бот админки — администратор канала): @имя или -100…
+    tg_channel_id: str = field(default_factory=lambda: _env("TG_CHANNEL_ID"))
     # Модель, которая пишет хуки и тексты роликов (сильнее — убедительнее). Пусто — та же, что для служебных задач.
     copy_model: str = field(default_factory=lambda: _env("COPY_MODEL", "claude-sonnet-5-5"))
     openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY"))

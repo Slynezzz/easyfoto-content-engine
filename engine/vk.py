@@ -276,9 +276,10 @@ class VK:
         import json
         plan = json.loads(post["script_json"] or "{}")
         hook = str(plan.get("script", {}).get("hook") or "").replace("*", "").strip()
-        link = funnel.link(self.cfg, "vk", "clip", f"p{post['id']}", target=self.cfg.vk_link_target)
+        link = self.cfg.cta_url or funnel.link(self.cfg, "vk", "clip", f"p{post['id']}",
+                                               target=self.cfg.vk_link_target)
         caption = (post["caption"] or "").strip()
-        text = f"{caption}\n\n👉 Попробовать бесплатно: {link}"
+        text = f"{caption}\n\n👉 {'Написать мне' if self.cfg.cta_url else 'Попробовать бесплатно'}: {link}"
         return (hook or "Нейрофото из обычных селфи")[:120], text[:4000]
 
     def publish(self, post_id: int) -> str:

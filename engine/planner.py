@@ -11,6 +11,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass, field
 
+from . import niche
 from .llm import AI, AIError
 from .playbook import Choice
 from .video.templates import Script
@@ -18,10 +19,8 @@ from .video.templates import Script
 log = logging.getLogger(__name__)
 
 SYSTEM = """Ты — сценарист коротких вертикальных видео (Reels, Shorts) и директ-маркетолог:
-вирусность, вовлечение и конверсия. Аккаунт: нейрофотограф. Автор показывает собственные фото,
-созданные его Telegram-ботом @{bot}.
-Главная цель каждого ролика — конверсия: зритель досмотрел, узнал в ролике свою ситуацию,
-переслал другу или сохранил, перешёл в бот по ссылке в профиле и сделал первое фото.
+вирусность, вовлечение и конверсия. {account}
+{goal}
 
 Пиши для конкретного сегмента аудитории, указанного в задании: его ситуация, его боль, его
 желание, сними его возражение. Хук — про зрителя и его жизнь, а не про инструмент.
@@ -40,8 +39,8 @@ SCHEMA_HINT = """Схема ответа:
   "hook": "заголовок на первые 2 секунды, до 60 символов, по мотивам паттерна хука; 1–2 ключевых слова оберни в *звёздочки* — они будут выделены цветом",
   "captions": ["подпись к кадру 1, до 22 символов", ... ровно {n} шт.],
   {scenes_hint}"cta_title": "финальный призыв, до 24 символов, одно ключевое слово в *звёздочках*",
-  "cta_sub": "подзаголовок призыва, до 55 символов, упомянуть бот по ссылке в профиле",
-  "post_caption": "текст поста 250–700 символов: первая строка цепляет ситуацией сегмента; дальше короткая история или польза и снятие возражения; повод переслать ролик конкретному другу; вопрос для комментариев; призыв перейти в бот по ссылке в профиле",
+  "cta_sub": "подзаголовок призыва, до 55 символов, {cta_sub_hint}",
+  "post_caption": "текст поста 250–700 символов: первая строка цепляет ситуацией сегмента; дальше короткая история или польза и снятие возражения; повод переслать ролик конкретному другу; вопрос для комментариев; {caption_cta_hint}",
   "hashtags": ["5–8 хештегов на русском и английском, с #"]
 }}"""
 
@@ -99,7 +98,8 @@ def _clip(text: str, limit: int) -> str:
 
 
 def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None,
-                 generate_scenes: bool, gender: str) -> str:
+                 generate_scenes: bool, gender: str, nic: dict | None = None) -> str:
+    nic = nic or niche.load("neurophoto")
     fmt = pb["formats"][choice.format]
     hook = pb["hooks"][choice.hook_id]
     theme = theme_info(pb, choice.theme)
@@ -116,11 +116,9 @@ def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None
     ]
     if theme.get("occasion"):
         lines.append(f"ПОВОД РОЛИКА: {theme['occasion']}. Все кадры, хук и текст — в тему этого повода. "
-                     "Свяжи повод с ботом: своё фото к празднику за пару минут, без студии и записи. "
-                     "Поздравить аудиторию уместно, но коротко и без пафоса.")
+                     + nic["occasion_hint"])
         if theme.get("profession"):
-            lines.append("Подача «я в профессии»: автор примеряет образ представителя профессии и "
-                         "поздравляет тех, кто в ней работает; предложи им сделать такое же фото.")
+            lines.append(nic["profession_hint"])
         if theme.get("timing"):
             lines.append(f"Время: {theme['timing']}")
         if theme.get("note"):
@@ -137,16 +135,18 @@ def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None
         lines.append("Что мы уже знаем по статистике аккаунта:")
         lines += [f"  — {x}" for x in pb["insights"]]
     lines.append("")
-    lines.append(SCHEMA_HINT.format(n=n, scenes_hint=SCENES_HINT.format(n=n) if generate_scenes else ""))
+    lines.append(SCHEMA_HINT.format(n=n, scenes_hint=SCENES_HINT.format(n=n) if generate_scenes else "",
+                                    cta_sub_hint=nic["cta_sub_hint"], caption_cta_hint=nic["caption_cta_hint"]))
     return "\n".join(lines)
 
 
-def validate(raw: dict, choice: Choice, pb: dict, n: int, generate_scenes: bool) -> Plan:
+def validate(raw: dict, choice: Choice, pb: dict, n: int, generate_scenes: bool, nic: dict | None = None) -> Plan:
     if not isinstance(raw, dict):
         raise AIError("ответ не объект")
     hook = _clip(raw.get("hook") or pb["hooks"][choice.hook_id]["pattern"], LIMITS["hook"])
     captions = [_clip(c, LIMITS["caption"]) for c in (raw.get("captions") or [])][:n]
     scenes: list[dict] = []
+    nic = nic or niche.load("neurophoto")
     if generate_scenes:
         for sc in (raw.get("scenes") or [])[:n]:
             if isinstance(sc, dict) and sc.get("where"):
@@ -161,8 +161,8 @@ def validate(raw: dict, choice: Choice, pb: dict, n: int, generate_scenes: bool)
     script = asdict(Script(
         hook=hook,
         captions=captions,
-        cta_title=_clip(raw.get("cta_title") or "Хочешь так же?", LIMITS["cta_title"]),
-        cta_sub=_clip(raw.get("cta_sub") or "Бот-нейрофотограф — по ссылке в профиле", LIMITS["cta_sub"]),
+        cta_title=_clip(raw.get("cta_title") or nic["default_cta_title"], LIMITS["cta_title"]),
+        cta_sub=_clip(raw.get("cta_sub") or nic["default_cta_sub"], LIMITS["cta_sub"]),
     ))
     caption = str(raw.get("post_caption") or "").replace("*", "").strip()[: LIMITS["post_caption"]]
     if len(caption) < 40:
@@ -170,40 +170,41 @@ def validate(raw: dict, choice: Choice, pb: dict, n: int, generate_scenes: bool)
     return Plan(choice=asdict(choice), script=script, scenes=scenes, post_caption=caption, hashtags=tags)
 
 
-def fallback(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None, bot: str) -> Plan:
+def fallback(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None, bot: str,
+             nic: dict | None = None) -> Plan:
     """Шаблонный сценарий без нейросети — чтобы конвейер не вставал."""
+    nic = nic or niche.load("neurophoto")
     theme = theme_info(pb, choice.theme)
     notes = photo_notes or theme["scenes"] or ["Новый образ"]
     captions = [_clip(x, LIMITS["caption"]) for x in (notes * n)[:n]]
-    caption = (f"{pb['hooks'][choice.hook_id]['pattern']}.\n\n"
-               f"Все кадры — мои, сделаны ботом @{bot} из обычных селфи. "
-               "Присылаешь несколько своих фото, выбираешь сцену — получаешь новый кадр.\n\n"
-               "Какой образ тебе ближе? Напиши номер в комментариях.\n"
-               "Опиши свою сцену — бот по ссылке в профиле.")
-    script = asdict(Script(hook=_clip(pb["hooks"][choice.hook_id]["pattern"], LIMITS["hook"]), captions=captions))
+    hook = pb["hooks"][choice.hook_id]["pattern"]
+    caption = nic["fallback_caption"].format(hook=hook.rstrip(".?!"), bot=bot)
+    script = asdict(Script(hook=_clip(hook, LIMITS["hook"]), captions=captions,
+                           cta_title=nic["default_cta_title"], cta_sub=nic["default_cta_sub"]))
     return Plan(choice=asdict(choice), script=script, post_caption=caption,
-                hashtags=["#нейрофотосессия", "#нейрофото", "#фотосессия", "#aiphoto", "#нейросеть"],
-                llm_ok=False)
+                hashtags=list(nic["fallback_hashtags"]), llm_ok=False)
 
 
 def plan(ai: AI, pb: dict, choice: Choice, n: int, *, photo_notes: list[str] | None = None,
          generate_scenes: bool = False, gender: str = "male", bot: str = "Easyfotobot",
-         brief_text: str = "", copy_model: str = "") -> Plan:
-    system = SYSTEM.format(bot=bot, brief=brief_text or "(бриф не задан)",
+         brief_text: str = "", copy_model: str = "", nic: dict | None = None) -> Plan:
+    nic = nic or niche.load("neurophoto")
+    system = SYSTEM.format(account=nic["account"].format(bot=bot), goal=nic["goal"],
+                           brief=brief_text or "(бриф не задан)",
                            rules="\n".join(f"- {r}" for r in pb.get("rules", [])))
-    prompt = build_prompt(pb, choice, n, photo_notes, generate_scenes, gender)
+    prompt = build_prompt(pb, choice, n, photo_notes, generate_scenes, gender, nic)
     last_err: Exception | None = None
     copy_error = ""
     if copy_model:
         # тексты пишет сильная модель; если не справилась — основная, как раньше
         try:
-            return validate(ai.json(system, prompt, model=copy_model), choice, pb, n, generate_scenes)
+            return validate(ai.json(system, prompt, model=copy_model), choice, pb, n, generate_scenes, nic)
         except (AIError, ValueError, TypeError, KeyError) as e:
             copy_error = f"{copy_model}: {str(e)[:200]}"
             log.warning("copy model failed: %s", copy_error)
     for _ in range(2):
         try:
-            res = validate(ai.json(system, prompt), choice, pb, n, generate_scenes)
+            res = validate(ai.json(system, prompt), choice, pb, n, generate_scenes, nic)
             res.copy_error = copy_error
             return res
         except (AIError, ValueError, TypeError, KeyError) as e:
@@ -213,7 +214,7 @@ def plan(ai: AI, pb: dict, choice: Choice, n: int, *, photo_notes: list[str] | N
         # Без описаний сцен генерировать нечего — пусть решает вызывающий код.
         raise AIError(f"планировщик не смог составить сцены: {last_err}")
     log.error("planner fallback: %s", last_err)
-    fb = fallback(pb, choice, n, photo_notes, bot)
+    fb = fallback(pb, choice, n, photo_notes, bot, nic)
     fb.llm_error = str(last_err)[:300]
     fb.copy_error = copy_error
     return fb

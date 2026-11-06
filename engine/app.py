@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import analyst, balances, funnel, images, occasions, playbook as pbm, scout, server
+from . import analyst, balances, funnel, images, niche, occasions, playbook as pbm, scout, server
 from .admin_bot import AdminBot, Services, retry_keyboard
 from .config import Config
 from .db import DB
@@ -27,6 +27,7 @@ from .producer import produce
 from .telegram import TelegramAPI
 from .vk import VK, VKError
 from .youtube import YouTube, YTError
+from .tgchannel import TGChannel, TGChannelError
 
 log = logging.getLogger("engine")
 
@@ -41,6 +42,7 @@ class Engine:
         self.cfg, self.db, self.ai, self.ig, self.bot = cfg, db, ai, ig, bot
         self.vk = VK(cfg, db)
         self.yt = YouTube(cfg, db)
+        self.tg = TGChannel(cfg, db, None)   # api подставляется, когда создан админ-бот
         self.tz = ZoneInfo(cfg.timezone)
         self._now = now or (lambda: datetime.now(self.tz))
         self.rng = rng or random.Random()
@@ -87,6 +89,11 @@ class Engine:
     def _events(self) -> list[dict]:
         return pbm.load(self.cfg.playbook_path).get("events", [])
 
+    def _for_niche(self, items: list) -> list:
+        """Календарные поводы, уместные для ниши аккаунта (инфоповоды разведчика — все)."""
+        nic = niche.load(self.cfg.niche)
+        return [o for o in items if niche.allows_occasion(nic, o.id)]
+
     def occasion_reels(self, occ, since_days: int) -> int:
         cutoff = (self.now() - timedelta(days=since_days)).astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
         return self.db.one("SELECT COUNT(*) n FROM posts WHERE theme=? AND status NOT IN ('rejected') "
@@ -97,7 +104,7 @@ class Engine:
         и не больше max_reels на один повод за всё его окно."""
         if made_today >= self.cfg.occasions_per_day:
             return None
-        for occ in occasions.active(self.now().date(), self._events()):
+        for occ in self._for_niche(occasions.active(self.now().date(), self._events())):
             if self.occasion_reels(occ, occ.lead + occ.after + 1) < occ.max_reels:
                 return occ
         return None
@@ -107,7 +114,7 @@ class Engine:
         today = self.now().date()
         q = query.strip().lower()
         if q in ("повод", "праздник"):
-            act = occasions.active(today, self._events())
+            act = self._for_niche(occasions.active(today, self._events()))
             occ = act[0] if act else None
         else:
             occ = occasions.find(q, today, self._events())
@@ -118,8 +125,8 @@ class Engine:
     def occasions_text(self) -> str:
         today = self.now().date()
         events = self._events()
-        act = {o.id for o in occasions.active(today, events)}
-        items = occasions.upcoming(today, 30, events)
+        act = {o.id for o in self._for_niche(occasions.active(today, events))}
+        items = self._for_niche(occasions.upcoming(today, 30, events))
         if not items:
             return "В ближайшие 30 дней поводов в календаре нет."
         lines = ["Поводы на 30 дней (● — уже идут ролики к поводу):"]
@@ -140,11 +147,12 @@ class Engine:
         return f"🚀 Ролик #{post_id} опубликован: {link}"
 
     # ------------------------------------------------------- другие площадки
-    PLATFORM_RU = {"vk": "📘 VK", "vk_manual": "📘 VK (пришлю файл и текст)", "yt": "▶️ YouTube Shorts"}
+    PLATFORM_RU = {"vk": "📘 VK", "vk_manual": "📘 VK (пришлю файл и текст)", "yt": "▶️ YouTube Shorts",
+                   "tg": "✈️ Telegram-канал"}
 
     def _publishers(self) -> dict:
         """Площадки с автоматической публикацией: имя → (клиент, класс ошибки)."""
-        return {"vk": (self.vk, VKError), "yt": (self.yt, YTError)}
+        return {"vk": (self.vk, VKError), "yt": (self.yt, YTError), "tg": (self.tg, TGChannelError)}
 
     def on_approved(self, post_id: int, now: bool) -> str:
         """Ставит одобренный ролик в очередь VK и YouTube. Возвращает строку для владельца."""
@@ -155,6 +163,8 @@ class Engine:
             platforms.append("vk_manual")
         if self.yt.ready():
             platforms.append("yt")
+        if self.tg.ready():
+            platforms.append("tg")
         if not platforms:
             return ""
         post = self.db.post(post_id)
@@ -205,6 +215,9 @@ class Engine:
 
     def yt_retry(self, post_id: int) -> str:
         return self.retry_crosspost("yt", post_id)
+
+    def tg_retry(self, post_id: int) -> str:
+        return self.retry_crosspost("tg", post_id)
 
     def job_crosspost(self) -> int:
         """Публикует на других площадках ролики, чьё время наступило. По одному на площадку за раз."""
@@ -500,6 +513,7 @@ class Engine:
 
 
 def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
+    niche.activate(cfg)   # стартовые плейбук и бриф — по нише аккаунта
     cfg.ensure_dirs()
     db = DB(cfg.db_path)
     ai = AI(cfg)
@@ -537,9 +551,13 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
             ig_status=engine.ig.check,
             yt_login=engine.yt.start_login,
             yt_retry=engine.yt_retry,
+            tg_retry=engine.tg_retry,
+            tg_status=lambda: (f"Telegram-канал: {cfg.tg_channel_id}" if cfg.tg_channel_id
+                               else "Telegram-канал: не подключён (TG_CHANNEL_ID)"),
             balances_text=lambda: balances.report(cfg, db, ai),
         ))
         engine.bot = bot
+        engine.tg.api = bot.api
     ai.attach(db, engine.say)   # помнить исчерпанные ключи и сообщать о переключении
     engine.recover()
     return engine, bot
@@ -561,8 +579,8 @@ def main() -> None:
         gen = {"mixed": f"новые кадры примерно в {cfg.generate_share:.0%} роликов",
                "generate": "новые кадры в каждом ролике",
                "library": "только готовые фото, без генерации"}.get(cfg.image_source, cfg.image_source)
-        bot.say(f"🟢 Контент-движок запущен. Фото: {gen}; лимит генерации {cfg.max_images_per_day} кадров "
-                "в сутки. /help — команды.")
+        bot.say(f"🟢 Контент-движок запущен. Ниша: {niche.load(cfg.niche)['title']}. Фото: {gen}; "
+                f"лимит генерации {cfg.max_images_per_day} кадров в сутки. /help — команды.")
 
     def poll_loop():
         while True:

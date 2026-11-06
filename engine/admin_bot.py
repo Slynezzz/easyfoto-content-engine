@@ -81,6 +81,8 @@ class Services:
     ig_status: Callable[[], str] | None = None
     yt_login: Callable[[], str] | None = None
     yt_retry: Callable[[int], str] | None = None
+    tg_retry: Callable[[int], str] | None = None
+    tg_status: Callable[[], str] = lambda: "Telegram-канал: не подключён"
 
 
 def approval_keyboard(post_id: int) -> dict:
@@ -759,6 +761,8 @@ class AdminBot:
             f"Instagram: {'подключён' if self.s.instagram_ready() else 'не подключён — публикуешь вручную'}",
             self.s.vk_status(),
             self.s.yt_status(),
+            self.s.tg_status(),
+            f"Ниша: {self.cfg.niche}",
             f"Тексты роликов пишет: {self.cfg.copy_model or 'основная модель'}"
             + (f" (⚠️ {self.db.get('last_copy_error')[:150]})" if self.db.get("last_copy_error") else ""),
             f"Источник фото: {self.cfg.image_source}; сгенерировано сегодня: "
@@ -805,9 +809,9 @@ class AdminBot:
                 self.api.answer_callback(cq["id"], "Уже отмечено")
             return
 
-        if action in ("vkretry", "ytretry"):
+        if action in ("vkretry", "ytretry", "tgretry"):
             self.api.answer_callback(cq["id"])
-            fn = self.s.vk_retry if action == "vkretry" else self.s.yt_retry
+            fn = {"vkretry": self.s.vk_retry, "ytretry": self.s.yt_retry, "tgretry": self.s.tg_retry}[action]
             if fn:
                 self.say(fn(post_id))
             return

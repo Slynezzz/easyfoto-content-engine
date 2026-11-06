@@ -35,7 +35,7 @@ def _dt(v) -> datetime | None:
 
 def publications(db: DB) -> dict[str, list[tuple[int, datetime]]]:
     """Когда ролики вышли на каждой площадке: {площадка: [(post_id, время)]}."""
-    out: dict[str, list[tuple[int, datetime]]] = {"ig": [], "vk": [], "yt": []}
+    out: dict[str, list[tuple[int, datetime]]] = {"ig": [], "vk": [], "yt": [], "tg": []}
     for r in db.q("SELECT id, published_at FROM posts WHERE published_at IS NOT NULL"):
         if (t := _dt(r["published_at"])):
             out["ig"].append((r["id"], t))

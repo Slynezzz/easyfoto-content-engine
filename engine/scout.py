@@ -22,7 +22,7 @@ import requests
 
 from . import brief
 from . import playbook as pbm
-from . import websearch
+from . import niche, websearch
 from .config import Config
 from .db import DB, now_iso
 from .llm import AI, AIError, parse_json
@@ -38,9 +38,7 @@ SYSTEM = """Ты — исследователь трендов коротких 
 TikTok, VK Клипы) для русскоязычной аудитории. Пользуйся поиском, опирайся на свежие материалы
 за последние 4–6 недель: обзоры трендов, разборы вирусных роликов, блоги маркетологов.
 
-Ниша аккаунта: нейрофотограф — автор показывает свои фото, созданные Telegram-ботом из обычных
-селфи (сцены, образы, эпохи, путешествия, деловые портреты). Цель роликов — досмотры,
-комментарии, сохранения и переходы в бот по ссылке в профиле.
+{niche_text}
 
 Правила для хуков:
 {rules}
@@ -54,7 +52,7 @@ TikTok, VK Клипы) для русскоязычной аудитории. П�
   "themes": [{{"id": "латиница_через_подчёркивание", "title": "название по-русски",
               "scenes": ["4–5 сцен для фото в этой теме"], "why": "почему сейчас"}}],
   "events": [{{"title": "инфоповод или мем по-русски", "date": "ГГГГ-ММ-ДД — когда это актуально",
-              "scenes": ["3–5 сцен, где автор в образе на эту тему"], "why": "почему зайдёт"}}],
+              "scenes": ["{event_scenes_hint}"], "why": "почему зайдёт"}}],
   "music": ["стиль фоновой музыки, который сейчас в трендах Reels и Shorts: жанр, темп (bpm), инструменты, настроение — на английском, до 150 символов"],
   "summary": "2–3 предложения для владельца аккаунта: что изменилось в трендах"
 }}
@@ -186,16 +184,8 @@ MONTHS = ["январь", "февраль", "март", "апрель", "май"
           "октябрь", "ноябрь", "декабрь"]
 
 
-def search_queries(today: date) -> list[str]:
-    month, year = MONTHS[today.month - 1], today.year
-    return [
-        f"тренды Reels {month} {year}",
-        f"тренды коротких видео {year} хуки первые секунды",
-        f"вирусные рилсы приёмы монтажа {year}",
-        f"нейрофотосессия тренд {year}",
-        f"Instagram Reels trends {today:%B} {year}",
-        f"YouTube Shorts hooks that work {year}",
-    ]
+def search_queries(today: date, nic: dict | None = None) -> list[str]:
+    return niche.queries(nic or niche.load("neurophoto"), today)
 
 
 def _materials_prompt(prompt: str, hits: list) -> str:
@@ -219,7 +209,7 @@ def _no_search_system(system: str) -> str:
 def _via_own_search(cfg: Config, ai: AI, system: str, prompt: str, today: date,
                     searcher: websearch.Searcher) -> tuple[dict, list[dict]]:
     """Ищем сами через выбранный сервис, читаем страницы, выводы делает Gemini."""
-    hits = websearch.gather(searcher, search_queries(today))
+    hits = websearch.gather(searcher, search_queries(today, niche.load(cfg.niche)))
     if not hits:
         raise websearch.SearchError("поиск ничего не нашёл")
     res = ai.json(_no_search_system(system), _materials_prompt(prompt, hits), temperature=0.4)
@@ -260,11 +250,13 @@ def run(cfg: Config, db: DB, ai: AI, today: date | None = None, now: datetime | 
     pb = pbm.load(cfg.playbook_path)
     rules = "\n".join(f"- {r}" for r in pb.get("rules", []))
     known = "\n".join(f"- {v['pattern']}" for v in pb["hooks"].values())
-    system = SYSTEM.format(rules=rules, formats=", ".join(pb["formats"]))
+    nic = niche.load(cfg.niche)
+    system = SYSTEM.format(rules=rules, formats=", ".join(pb["formats"]), niche_text=nic["scout_niche"],
+                           event_scenes_hint=nic["event_scenes_hint"])
     system += ("\n\nБРИФ ПРОДУКТА И АУДИТОРИИ — ищи то, что работает именно на эти сегменты "
-               "и ведёт к конверсии в бот:\n" + brief.load(cfg))
+               f"и ведёт {nic['conversion_target']}:\n" + brief.load(cfg))
     prompt = (f"Сегодня {today:%d.%m.%Y}. Найди, что сейчас работает в коротких видео в нише "
-              f"нейрофото и AI-фотосессий и в целом в Reels/Shorts.\n\nУже есть хуки:\n{known}")
+              f"{nic['scout_topic']} и в целом в Reels/Shorts.\n\nУже есть хуки:\n{known}")
     res, sources, method, failures = None, [], "", []
     # 1. модель, которая ищет сама (Perplexity Sonar)
     if cfg.search_provider.lower() == "perplexity":

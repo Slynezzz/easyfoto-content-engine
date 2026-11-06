@@ -187,9 +187,9 @@ class YouTube:
         plan = json.loads(post["script_json"] or "{}")
         hook = str(plan.get("script", {}).get("hook") or "").replace("*", "").strip()
         title = (hook or "Нейрофото из обычных селфи")[:90].rstrip() + " #shorts"
-        link = funnel.link(self.cfg, "yt", "short", f"p{post['id']}")
+        link = self.cfg.cta_url or funnel.link(self.cfg, "yt", "short", f"p{post['id']}")
         caption = (post["caption"] or "").strip()
-        desc = f"{caption}\n\n👉 Бот — ссылка в шапке канала. Или: {link}"
+        desc = f"{caption}\n\n👉 {'Связаться' if self.cfg.cta_url else 'Бот'} — ссылка в шапке канала. Или: {link}"
         return title[:100], desc[:4900]
 
     def publish(self, post_id: int) -> str:
