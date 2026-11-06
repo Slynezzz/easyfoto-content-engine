@@ -80,7 +80,12 @@ class Engine:
         return True
 
     # -------------------------------------------------------------- actions
+    def gen_paused(self) -> bool:
+        return self.db.get("gen_paused") == "1"
+
     def make_one(self, scheduled_for: str | None = None, occasion=None) -> int:
+        if self.gen_paused():
+            raise RuntimeError("генерация остановлена — включить: /run или кнопка в /status")
         pb = pbm.load(self.cfg.playbook_path)
         return produce(self.cfg, self.db, self.ai, pb, self.now().date(), self.rng, scheduled_for,
                        occasion=occasion)
@@ -326,7 +331,7 @@ class Engine:
     def job_plan(self) -> int:
         """Утром собирает ролики на сегодняшние свободные слоты и шлёт на одобрение."""
         now = self.now()
-        if now.hour < self.cfg.plan_hour:
+        if now.hour < self.cfg.plan_hour or self.gen_paused():
             return 0
         made = 0
         occ_today = self._occasion_posts_today()
@@ -392,6 +397,8 @@ class Engine:
 
     def job_tag(self) -> int:
         images.scan(self.cfg, self.db)
+        if self.gen_paused():
+            return 0
         if not (self.cfg.gemini_api_key or self.cfg.openai_api_key):
             if images.untagged_count(self.db) and self._once("warn:no_ai_key"):
                 self.say("⚠️ Не задан ни GEMINI_API_KEY, ни OPENAI_API_KEY — фото не размечаются, "
@@ -558,6 +565,7 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
         ))
         engine.bot = bot
         engine.tg.api = bot.api
+        bot.set_menu()
     ai.attach(db, engine.say)   # помнить исчерпанные ключи и сообщать о переключении
     engine.recover()
     return engine, bot

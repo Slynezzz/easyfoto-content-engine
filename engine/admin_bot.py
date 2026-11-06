@@ -42,6 +42,8 @@ HELP = """Команды:
 /funnel — сколько пришло в бот по ссылкам, сделали фото и купили (/funnel 7 — за неделю)
 /links — ссылки на бот с меткой для шапки каждой соцсети
 /analyze — пересчитать плейбук по статистике
+/status — состояние и кнопки: остановить/включить генерацию и публикации
+/stop и /run — остановить или включить генерацию роликов (тренды и отчёты работают всегда)
 /pause и /resume — остановить или включить автопубликацию
 /scan — разобрать новые фото
 /photos — хранилище фото: посмотреть, удалить, перенести
@@ -56,6 +58,20 @@ HELP = """Команды:
 • «реф» — референсы для генерации новых кадров
 
 Ошибся папкой? Ответь на своё фото словом «до», «реф» или «библиотека»."""
+
+GEN_OFF = ("⏸ Генерация остановлена: новые ролики, кадры, тексты и музыка не создаются, нейросети не тратятся. "
+           "Тренды, статистика и еженедельные отчёты продолжают собираться. Уже одобренные ролики выходят "
+           "по расписанию (остановить их — «Пауза публикаций»).")
+GEN_ON = "▶️ Генерация включена: ролики снова собираются по расписанию."
+MENU = [{"command": "status", "description": "Состояние и кнопки старт/стоп"},
+        {"command": "stop", "description": "Остановить генерацию роликов"},
+        {"command": "run", "description": "Включить генерацию роликов"},
+        {"command": "make", "description": "Собрать ролик сейчас"},
+        {"command": "queue", "description": "Очередь роликов"},
+        {"command": "trends", "description": "Тренды сейчас"},
+        {"command": "stats", "description": "Статистика роликов"},
+        {"command": "balance", "description": "Балансы и ключи"},
+        {"command": "help", "description": "Все команды"}]
 
 
 @dataclass
@@ -605,7 +621,7 @@ class AdminBot:
         args = args or []
         if cmd in ("/start", "/help"):
             self.say(HELP)
-        elif cmd == "/make" and args and self.s.make_for:
+        elif cmd == "/make" and args and self.s.make_for and not self.gen_paused:
             query = " ".join(args)
             self.say(f"Собираю ролик к поводу «{query}»: генерирую новые кадры, это 3–6 минут…")
 
@@ -620,6 +636,9 @@ class AdminBot:
             self.run_bg(job)
         elif cmd == "/occasions":
             self.say(self.s.occasions_text())
+        elif cmd == "/make" and self.gen_paused:
+            self.say("⏸ Генерация остановлена — ролики не собираются. Включить: /run или кнопка в /status.",
+                     self.control_keyboard())
         elif cmd == "/make":
             self.say("Собираю ролик, это займёт 1–3 минуты (с генерацией новых кадров — до 6)…")
 
@@ -631,17 +650,24 @@ class AdminBot:
         elif cmd == "/queue":
             self.say(self.queue_text())
         elif cmd == "/status":
-            self.say(self.status_text())
+            self.say(self.status_text(), self.control_keyboard())
         elif cmd == "/stats":
             self.say(self.s.stats_text())
         elif cmd == "/analyze":
             self.run_bg(lambda: self.say(self.s.run_analysis()))
         elif cmd == "/pause":
             self.db.set("paused", "1")
-            self.say("⏸ Автопубликация на паузе. Ролики продолжат собираться на одобрение.")
+            self.say("⏸ Автопубликация на паузе. Ролики продолжат собираться на одобрение.",
+                     self.control_keyboard())
         elif cmd == "/resume":
             self.db.set("paused", "0")
-            self.say("▶️ Автопубликация включена.")
+            self.say("▶️ Автопубликация включена.", self.control_keyboard())
+        elif cmd == "/stop":
+            self.db.set("gen_paused", "1")
+            self.say(GEN_OFF, self.control_keyboard())
+        elif cmd == "/run":
+            self.db.set("gen_paused", "0")
+            self.say(GEN_ON, self.control_keyboard())
         elif cmd == "/ai":
             self.say("Проверяю нейросети…")
             self.run_bg(lambda: self.say(self.s.check_ai()))
@@ -743,6 +769,37 @@ class AdminBot:
                 "а сюда придёт отчёт. Копировать ничего не нужно.\n\n"
                 "Если VK пишет ошибку про redirect_uri или scope — проверь настройки:\n" + setup)
 
+    @property
+    def gen_paused(self) -> bool:
+        return self.db.get("gen_paused") == "1"
+
+    def control_keyboard(self) -> dict:
+        gen = ("▶️ Включить генерацию", "ctl:gen_on") if self.gen_paused else ("⏸ Остановить генерацию", "ctl:gen_off")
+        pub = ("▶️ Включить публикации", "ctl:pub_on") if self.paused else ("⏸ Пауза публикаций", "ctl:pub_off")
+        return {"inline_keyboard": [[{"text": gen[0], "callback_data": gen[1]}],
+                                    [{"text": pub[0], "callback_data": pub[1]}]]}
+
+    def on_control_callback(self, cq: dict, data: str) -> None:
+        what = data.split(":", 1)[1]
+        key, value, text = {"gen_off": ("gen_paused", "1", GEN_OFF), "gen_on": ("gen_paused", "0", GEN_ON),
+                            "pub_off": ("paused", "1", "⏸ Автопубликация на паузе."),
+                            "pub_on": ("paused", "0", "▶️ Автопубликация включена.")}.get(what, (None, None, ""))
+        if not key:
+            self.api.answer_callback(cq["id"])
+            return
+        self.db.set(key, value)
+        self.api.answer_callback(cq["id"], text[:190])
+        msg_id = (cq.get("message") or {}).get("message_id")
+        self.api.edit_markup(self.admin, msg_id, self.control_keyboard())
+        self.say(text)
+
+    def set_menu(self) -> None:
+        """Список команд в кнопке «Меню» Telegram — чтобы управление было под рукой."""
+        try:
+            self.api.call("setMyCommands", commands=MENU)
+        except Exception as e:  # noqa: BLE001
+            log.warning("setMyCommands: %s", e)
+
     def queue_text(self) -> str:
         lines = []
         for status, label in (("pending", "Ждут одобрения"), ("approved", "Одобрены, ждут публикации")):
@@ -756,7 +813,9 @@ class AdminBot:
         lib = self.db.one("SELECT COUNT(*) n, SUM(title IS NOT NULL) t FROM assets WHERE kind='library'")
         last = self.db.one("SELECT published_at, permalink FROM posts WHERE status='published' ORDER BY published_at DESC LIMIT 1")
         return "\n".join([
-            f"Автопубликация: {'на паузе' if self.paused else 'включена'}",
+            f"Генерация роликов: {'⏸ остановлена' if self.gen_paused else '▶️ включена'} "
+            "(тренды, статистика и отчёты работают всегда)",
+            f"Автопубликация: {'⏸ на паузе' if self.paused else '▶️ включена'}",
             self.s.ig_status() if self.s.ig_status else
             f"Instagram: {'подключён' if self.s.instagram_ready() else 'не подключён — публикуешь вручную'}",
             self.s.vk_status(),
@@ -786,6 +845,9 @@ class AdminBot:
             return
         if data.split(":", 1)[0] in ("bok", "bno"):
             self.on_brief_callback(cq, data)
+            return
+        if data.startswith("ctl:"):
+            self.on_control_callback(cq, data)
             return
         action, _, raw_id = data.partition(":")
         if action == "noop" or not raw_id.isdigit():

@@ -72,7 +72,7 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
     photos: list = []
     plan: planner.Plan | None = None
     brief_text = brief.load(cfg)
-    has_refs = bool(images.pick_refs(db))
+    has_refs = bool(images.pick_refs(db)) or images.illustration_mode(cfg)  # иллюстрациям лицо не нужно
     want_new = bool(occasion) or cfg.image_source == "generate" or (
         cfg.image_source == "mixed" and rng.random() < cfg.generate_share)
     if occasion and not has_refs:

@@ -135,7 +135,8 @@ def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None
         lines.append("Что мы уже знаем по статистике аккаунта:")
         lines += [f"  — {x}" for x in pb["insights"]]
     lines.append("")
-    lines.append(SCHEMA_HINT.format(n=n, scenes_hint=SCENES_HINT.format(n=n) if generate_scenes else "",
+    hint = (nic.get("scenes_hint") or SCENES_HINT).format(n=n)
+    lines.append(SCHEMA_HINT.format(n=n, scenes_hint=hint if generate_scenes else "",
                                     cta_sub_hint=nic["cta_sub_hint"], caption_cta_hint=nic["caption_cta_hint"]))
     return "\n".join(lines)
 

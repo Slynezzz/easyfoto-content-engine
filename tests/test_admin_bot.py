@@ -327,5 +327,24 @@ class AdminBotTests(unittest.TestCase):
         self.assertIn("accounts.google.com", self.api.texts()[-1])
 
 
+    def test_stop_and_run_generation_with_buttons(self):
+        self.bot.handle(msg("/status"))
+        self.assertIn("Генерация роликов: ▶️ включена", self.api.texts()[-1])
+        self.bot.handle(msg("/stop"))
+        self.assertEqual(self.db.get("gen_paused"), "1")
+        self.assertIn("Генерация остановлена", self.api.texts()[-1])
+        made = []
+        self.bot.s.make_one = lambda: made.append(1) or 1
+        self.bot.handle(msg("/make"))
+        self.assertEqual(made, [])
+        self.assertIn("Генерация остановлена", self.api.texts()[-1])
+        self.bot.handle(cb("ctl:gen_on"))
+        self.assertEqual(self.db.get("gen_paused"), "0")
+        self.bot.handle(cb("ctl:pub_off"))
+        self.assertEqual(self.db.get("paused"), "1")
+        self.assertIn("⏸ на паузе", self.bot.status_text())
+        self.assertIn("▶️ включена", self.bot.status_text())
+
+
 if __name__ == "__main__":
     unittest.main()

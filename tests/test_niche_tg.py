@@ -65,6 +65,63 @@ class NicheTests(unittest.TestCase):
         self.assertTrue(niche.allows_occasion(niche.load("neurophoto"), "halloween"))
 
 
+class PauseAndIllustrationTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cfg = Config(data_dir=Path(self._tmp.name), niche="expert", publish_hours="12,19", reels_per_day=2)
+        self.cfg.ensure_dirs()
+        self.db = DB(self.cfg.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        self._tmp.cleanup()
+
+    def test_paused_engine_does_not_generate_but_scouts(self):
+        clock = Clock(datetime(2026, 11, 6, 10, 0, tzinfo=TZ))
+        engine = Engine(self.cfg, self.db, ai=None, ig=FakeIG(self.db), bot=FakeBot(), now=clock)
+        self.db.set("gen_paused", "1")
+        self.assertEqual(engine.job_plan(), 0)
+        with self.assertRaises(RuntimeError):
+            engine.make_one()
+
+    def test_illustration_without_face_photos(self):
+        import base64, io
+        from PIL import Image
+        from engine import images
+        buf = io.BytesIO()
+        Image.new("RGB", (64, 112), (10, 20, 30)).save(buf, "PNG")
+        ai = mock.Mock()
+        ai.image.return_value = mock.Mock(data=buf.getvalue(), provider="OpenAI/generations/gpt-image")
+        self.assertTrue(images.illustration_mode(self.cfg))
+        pid = images.generate(self.cfg, self.db, ai, {"title": "ИИ отвечает клиентам", "where": "кафе",
+                                                     "doing": "смартфон с чат-ботом"}, "ai_tech")
+        self.assertTrue(pid)
+        prompt, refs = ai.image.call_args[0]
+        self.assertEqual(refs, [])
+        self.assertIn("Никакого текста", prompt)
+        self.assertIn("смартфон с чат-ботом", prompt)
+
+    def test_generations_endpoint_when_no_refs(self):
+        from engine.llm import AI
+        import base64, io
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (64, 112)).save(buf, "PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        calls = []
+
+        def post(url, **kw):
+            calls.append((url, kw.get("json")))
+            r = mock.Mock(status_code=200, text="")
+            r.json.return_value = {"data": [{"b64_json": b64}]}
+            return r
+        with mock.patch("engine.llm.requests.post", side_effect=post):
+            res = AI._edits_image("https://img.example", "k", "gpt-image-1.5", "p", [])
+        self.assertEqual(calls[0][0], "https://img.example/v1/images/generations")
+        self.assertEqual(calls[0][1]["size"], "1024x1536")
+        self.assertEqual(res.provider if hasattr(res, "provider") else res.mode, "generations")
+
+
 class TGApi:
     def __init__(self, fail=None):
         self.fail, self.videos, self.texts = fail, [], []

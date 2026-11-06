@@ -41,6 +41,24 @@ def core_prompt(cfg: Config) -> str:
     return (custom if custom.exists() else CORE_PROMPT_PATH).read_text(encoding="utf-8")
 
 
+ILLUSTRATION_PROMPT_PATH = Path(__file__).with_name("prompts") / "illustration.md"
+
+
+def illustration_mode(cfg: Config) -> bool:
+    """Ниша рисует иллюстрации к смыслу кадра, а не фото человека по его снимкам."""
+    from . import niche
+    return niche.load(cfg.niche).get("image_mode") == "illustration"
+
+
+def illustration_prompt(scene: dict) -> str:
+    return (ILLUSTRATION_PROMPT_PATH.read_text(encoding="utf-8") + "\nКадр:\n"
+            f"  Где: {scene.get('where', '')}\n"
+            f"  Что происходит: {scene.get('doing', '')}\n"
+            f"  Детали: {scene.get('around', '')}\n"
+            f"  Свет и стиль: {scene.get('light') or 'мягкий естественный свет, современная фотография'}\n"
+            f"  Смысл кадра: {scene.get('title', '')}")
+
+
 def scene_prompt(scene: dict) -> str:
     """Часть B — кадр из 4 условий плюс свет."""
     return (
@@ -203,6 +221,12 @@ def images_used_today(db: DB) -> int:
 
 def _generate_image(cfg: Config, ai: AI, refs: list[str], scene: dict) -> tuple[Image.Image, str]:
     """Генерирует кадр по сцене. Возвращает (картинка, каким путём получена)."""
+    if not refs and illustration_mode(cfg):
+        res = ai.image(illustration_prompt(scene), [])
+        try:
+            return Image.open(io.BytesIO(res.data)).convert("RGB"), res.provider
+        except OSError:
+            raise AIError("посредник вернул не картинку") from None
     prompt = f"{core_prompt(cfg)}\n\n{scene_prompt(scene)}"
     # Оригиналы «файлом» бывают по 5–20 МБ: 8 таких в одном запросе
     # превышают лимиты. Отправляем уменьшенные копии.
@@ -234,8 +258,8 @@ def _generate_image(cfg: Config, ai: AI, refs: list[str], scene: dict) -> tuple[
 
 def generate(cfg: Config, db: DB, ai: AI, scene: dict, theme: str) -> int:
     """Генерирует кадр по сцене и сохраняет в базу. Возвращает id нового фото."""
-    refs = pick_refs(db)
-    if not refs:
+    refs = [] if illustration_mode(cfg) else pick_refs(db)
+    if not refs and not illustration_mode(cfg):
         raise AIError("нет фото лица: пришли в админ-бот свои фото с подписью «реф» или «до»")
     _spend_image_budget(cfg, db)
     im, _ = _generate_image(cfg, ai, refs, scene)
@@ -255,9 +279,13 @@ TEST_SCENE = {"title": "Деловой портрет", "where": "светлый
 def test_generate(cfg: Config, db: DB, ai: AI, scene: dict | None = None) -> tuple[Path, str, float]:
     """Пробный кадр для /imgtest: ничего не сохраняет в библиотеку."""
     import time
-    refs = pick_refs(db)
-    if not refs:
+    refs = [] if illustration_mode(cfg) else pick_refs(db)
+    if not refs and not illustration_mode(cfg):
         raise AIError("нет фото лица: пришли в админ-бот свои фото с подписью «реф» или «до»")
+    if illustration_mode(cfg) and scene is None:
+        scene = {"title": "ИИ помогает малому бизнесу", "where": "небольшое кафе у моря утром",
+                 "doing": "на стойке смартфон, на экране чат-бот принимает бронь", "around": "чашки, утренний свет",
+                 "light": "мягкий утренний свет, современная фотография"}
     _spend_image_budget(cfg, db)
     t0 = time.time()
     im, provider = _generate_image(cfg, ai, refs, scene or TEST_SCENE)

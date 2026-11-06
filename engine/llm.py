@@ -642,6 +642,14 @@ class AI:
 
     @staticmethod
     def _edits_image(base, key, model, prompt, refs):
+        if not refs:  # иллюстрация без фото человека — обычная генерация по описанию
+            data = _post(f"{base}/v1/images/generations", timeout=240, retries=2, retry_timeouts=False,
+                         headers={"Authorization": f"Bearer {key}"},
+                         json={"model": model, "prompt": prompt, "size": "1024x1536", "n": 1})
+            img = extract_image(data)
+            if not img:
+                raise AIRefused("посредник не вернул изображение")
+            return ImageResult(img[0], img[1], "generations")
         files = []
         for p in refs[:10]:
             p = Path(p)
