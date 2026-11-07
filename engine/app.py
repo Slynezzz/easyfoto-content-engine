@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import random
 import threading
@@ -102,7 +103,7 @@ class Engine:
             raise ValueError("тема не найдена — откройте /create заново")
         req = {"title": t["title"], "angle": t["angle"] or "", "url": t["url"] or "",
                "platform": platform, "topic_id": t["id"]}
-        if kind in ("post", "carousel"):
+        if kind in ("post", "carousel", "dialog"):
             if self.gen_paused():
                 raise RuntimeError("генерация остановлена — включить: /run или кнопка в /status")
             post_id = brain.make_post(self.cfg, self.db, self.ai, req, kind)
@@ -194,7 +195,7 @@ class Engine:
             platforms.append("yt")
         if self.tg.ready():
             platforms.append("tg")
-        if post["format"] in ("post", "carousel"):  # картинки: в YouTube нельзя, во VK — вручную (стена)
+        if post["format"] in ("post", "carousel", "dialog"):  # картинки: в YouTube нельзя, во VK — вручную (стена)
             platforms = [("vk_manual" if p == "vk" else p) for p in platforms if p != "yt"]
             if "vk_manual" not in platforms and (self.vk.can_autopublish() or self.cfg.vk_manual):
                 platforms.append("vk_manual")
@@ -486,6 +487,27 @@ class Engine:
             return False
         self.db.set("last_scout_error", "")
         self.say(report)
+        self.hot_alert()
+        return True
+
+    def hot_alert(self) -> bool:
+        """Горячие поводы после разведки: свежие новости ниши с кнопкой «сделать» — реакция в первые сутки."""
+        if not niche.load(self.cfg.niche).get("posts"):
+            return False
+        try:
+            ids = json.loads(self.db.get("hot_topics") or "[]")
+        except ValueError:
+            ids = []
+        self.db.set("hot_topics", "[]")
+        topics = [t for t in (self.db.topic(i) for i in ids) if t and not t["used_at"]]
+        if not topics:
+            return False
+        lines = ["🔥 Горячие поводы — реакция в первые сутки собирает больше всего охвата:"]
+        rows = []
+        for t in topics:
+            lines.append(f"\n• {t['title']}" + (f"\n  {t['angle']}" if t["angle"] else ""))
+            rows.append([{"text": f"✨ {t['title'][:50]}", "callback_data": f"ct:{t['id']}"}])
+        self.say("\n".join(lines) + "\n\nНажмите тему — выберете площадку и формат.", {"inline_keyboard": rows})
         return True
 
     def job_analysis(self) -> bool:

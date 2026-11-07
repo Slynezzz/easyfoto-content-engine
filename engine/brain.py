@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import secrets
 from collections import Counter
 from pathlib import Path
@@ -42,7 +43,7 @@ def strategy() -> dict:
 
 def _recent(db: DB, n: int = HISTORY) -> list[dict]:
     out = []
-    for r in db.q("SELECT id, script_json FROM posts WHERE format IN ('post', 'carousel') AND status != 'rejected' "
+    for r in db.q("SELECT id, script_json FROM posts WHERE format IN ('post', 'carousel', 'dialog') AND status != 'rejected' "
                   "ORDER BY id DESC LIMIT ?", (n,)):
         try:
             b = json.loads(r["script_json"] or "{}").get("brain") or {}
@@ -114,8 +115,8 @@ WRITE_SCHEMA = """Схема ответа:
   "objection": "какое возражение снимает пост (или пусто)",
   "hooks": [{{"mechanic": "id механики", "text": "хук до 70 символов"}}, ... ровно 5 шт., механики разные],
   "best": номер лучшего хука от 0 до 4,
-  "headline": "заголовок на картинку — лучший хук, до 60 символов; 1–2 ключевых слова в *звёздочках*",
-  "subline": "подзаголовок на картинку до 70 символов — обещание пользы поста, без звёздочек",
+  "headline": "заголовок на картинку — лучший хук, до 60 символов, одна фраза БЕЗ кавычек и тире; 1–2 ключевых слова в *звёздочках*",
+  "subline": "подзаголовок до 70 символов — что получит читатель (польза, результат), а не описание поста: без «разбираю», «рассказываю», «в этом посте»; без звёздочек",
   "body": "текст поста по правилам площадки: первая строка цепляет, дальше польза, в конце призыв этапа воронки{link_hint}",
   "hashtags": ["до {tags} тематических хэштегов с #"],
   "image": {{
@@ -138,6 +139,17 @@ CAROUSEL_SCHEMA = """
 Слайды идут логикой: ответ на заголовок → факты → что делать → вывод. Каждый слайд понятен сам по себе.
 Поле "body" для карусели — подпись 600–1200 символов: суть, зачем листать, призыв; детали — на слайдах."""
 
+DIALOG_SCHEMA = """
+Это ПОСТ С ПЕРЕПИСКОЙ: картинкой будет макет чата клиента с ботом — наглядный пример сценария
+(не реальный диалог). Добавь в ответ:
+  "dialog": {"bot_name": "кто отвечает, без реальных брендов, например «Агентство · помощник»",
+             "time": "время первого сообщения клиента, например 23:40",
+             "messages": [{"from": "client" или "bot", "text": "до 140 символов"}, ... от 5 до 7 сообщений]}
+Сценарий показывает решение боли из поста: клиент пишет в неудобное время или с типовым вопросом → бот
+отвечает по делу, уточняет, записывает или квалифицирует, передаёт человеку. Без цен, реальных компаний
+и имён клиентов. Заголовок — про ситуацию в чате. Поле "body" — разбор сценария: что бот сделал на каждом
+шаге и почему это важно для бизнеса (с фактами из исследования); "image" не нужен."""
+
 CRITIC_SYSTEM = """Ты — редактор-критик в команде маркетинга эксперта. Твоя задача — чтобы пост привёл заявки.
 Проверь черновик строго по чек-листу и перепиши всё слабое. Не добавляй фактов, которых нет в брифе,
 теме и черновике. Сохрани смысл, этап воронки и правила площадки. Отвечай ТОЛЬКО JSON."""
@@ -152,6 +164,25 @@ CRITIC_SCHEMA = """Схема ответа:
   "hashtags": ["..."],
   "slides": [...] и "cta_slide": {...} — только если они есть в черновике (карусель): те же поля, исправленные
 }"""
+
+
+QUOTES = str.maketrans("", "", "«»\"„“”")
+META_LEAD = re.compile(r"^\s*(разбираю|разберу|рассказываю|расскажу|показываю|покажу|объясняю|объясню|"
+                       r"в этом посте|в посте|пост о том|сегодня)[^:—.]*[:—.]\s*", re.I)
+
+
+def clean_headline(s: str) -> str:
+    """Заголовок на картинке: без кавычек и тире — одна чистая фраза."""
+    s = (s or "").translate(QUOTES)
+    s = re.sub(r"\s+[—–-]\s+", ", ", s)
+    s = re.sub(r"\s+", " ", s).strip(" ,—–-")
+    return s[:1].upper() + s[1:]
+
+
+def clean_subline(s: str) -> str:
+    """Подзаголовок — польза для читателя, без «Разбираю возражение:» и звёздочек."""
+    s = META_LEAD.sub("", (s or "").replace("*", "").translate(QUOTES)).strip()
+    return s[:1].upper() + s[1:]
 
 
 def _clip(s: str, n: int) -> str:
@@ -226,7 +257,7 @@ def critic_prompt(draft: dict, request: dict, stage: str, strat: dict, facts: st
         "",
         "ЧЕРНОВИК:",
         json.dumps({k: draft.get(k) for k in ("headline", "subline", "body", "hashtags", "objection", "insight",
-                                              "slides", "cta_slide") if draft.get(k) is not None},
+                                              "slides", "cta_slide", "dialog") if draft.get(k) is not None},
                    ensure_ascii=False, indent=1),
         "",
         CRITIC_SCHEMA,
@@ -259,6 +290,8 @@ def write(cfg: Config, db: DB, ai: AI, request: dict, kind: str = "post") -> dic
                           lead_winners(db), pb.get("trend_notes", []), facts)
     if kind == "carousel":
         prompt += "\n" + CAROUSEL_SCHEMA.replace("{{", "{").replace("}}", "}")
+    elif kind == "dialog":
+        prompt += "\n" + DIALOG_SCHEMA
     try:
         draft = _ask(ai, cfg, system, prompt)
     except AIError as e:
@@ -270,7 +303,7 @@ def write(cfg: Config, db: DB, ai: AI, request: dict, kind: str = "post") -> dic
     try:
         critic = _ask(ai, cfg, CRITIC_SYSTEM + "\n\nБРИФ:\n" + (brief.load(cfg) or ""),
                       critic_prompt(draft, request, stage, strat, facts))
-        for k in ("headline", "subline", "body", "hashtags", "slides", "cta_slide"):
+        for k in ("headline", "subline", "body", "hashtags", "slides", "cta_slide", "dialog"):
             if critic.get(k):
                 final[k] = critic[k]
     except AIError as e:
@@ -290,8 +323,8 @@ def write(cfg: Config, db: DB, ai: AI, request: dict, kind: str = "post") -> dic
         "insight": _clip(draft.get("insight", ""), 300),
         "objection": _clip(draft.get("objection", ""), 200),
         "hooks": hooks,
-        "headline": _clip(final.get("headline", ""), 70),
-        "subline": _clip((final.get("subline") or "").replace("*", ""), 80),
+        "headline": _clip(clean_headline(final.get("headline", "")), 70),
+        "subline": _clip(clean_subline(final.get("subline") or ""), 80),
         "body": _clip(final.get("body", ""), pl["caption_limit"] - 200),
         "hashtags": tags,
         "image": image,
@@ -301,11 +334,23 @@ def write(cfg: Config, db: DB, ai: AI, request: dict, kind: str = "post") -> dic
         "sources": used_sources(final.get("body", "") + " " + " ".join(
             str(x.get("source", "")) + " " + str(x.get("text", "")) for x in (final.get("slides") or [])
             if isinstance(x, dict)), found.get("facts", [])),
-        "slides": [{"title": _clip(x.get("title", ""), 60), "text": _clip(x.get("text", ""), 260),
+        "slides": [{"title": _clip(clean_headline(x.get("title", "")), 60), "text": _clip(x.get("text", ""), 260),
                     "source": _clip(x.get("source", ""), 70)}
                    for x in (final.get("slides") or []) if isinstance(x, dict) and x.get("title")][:6],
         "cta_slide": final.get("cta_slide") if isinstance(final.get("cta_slide"), dict) else None,
+        "dialog": clean_dialog(final.get("dialog")),
     }
+
+
+def clean_dialog(d) -> dict | None:
+    if not isinstance(d, dict):
+        return None
+    msgs = [{"from": "client" if m.get("from") == "client" else "bot", "text": _clip(str(m.get("text") or ""), 160)}
+            for m in (d.get("messages") or []) if isinstance(m, dict) and (m.get("text") or "").strip()][:7]
+    if len(msgs) < 3:
+        return None
+    return {"bot_name": _clip(str(d.get("bot_name") or "Бот компании"), 34), "time": str(d.get("time") or "")[:5],
+            "messages": msgs}
 
 
 def used_sources(body: str, facts: list[dict], limit: int = 4) -> list[dict]:
@@ -412,22 +457,27 @@ def make_post(cfg: Config, db: DB, ai: AI, request: dict, kind: str = "post") ->
     post = write(cfg, db, ai, request, kind)
     if kind == "carousel" and len(post["slides"]) < 3:
         raise BrainError("копирайтер не написал слайды карусели — попробуйте ещё раз")
-    try:
-        im, provider = picture(cfg, db, ai, post["image"])
-    except AIError as e:
-        raise BrainError(f"картинка не получилась: {e}") from None
+    if kind == "dialog" and not post["dialog"]:
+        raise BrainError("копирайтер не написал переписку — попробуйте ещё раз")
     token = secrets.token_urlsafe(18)
     out = cfg.media_dir / f"{token}.jpg"
-    nic = niche.load(cfg.niche)
-    postcard.compose(im, post["headline"], post["subline"], out,
-                     brand=f"{nic.get('lead_author', '')} · AI-архитектор".strip(" ·"),
-                     author_photo=post["image"].get("mode") == "author")
-    brand = f"{nic.get('lead_author', '')} · AI-архитектор".strip(" ·")
+    if kind == "dialog":  # картинка — макет чата, нейросеть для изображения не нужна
+        post["image"] = {"mode": "dialog"}
+        provider = "dialog"
+        postcard.dialog_card(post["headline"], post["dialog"], out)
+    else:
+        try:
+            im, provider = picture(cfg, db, ai, post["image"])
+        except AIError as e:
+            raise BrainError(f"картинка не получилась: {e}") from None
+        postcard.compose(im, post["headline"], post["subline"], out,
+                         author_photo=post["image"].get("mode") == "author")
+    brand = ""  # подпись автора на картинках не нужна: она не кликается и ничего не добавляет
     slides = render_slides(cfg, post, token, request.get("platform"), brand) if kind == "carousel" else []
     caption = compose_caption(post, request.get("platform"))
     script = {"script": {"hook": post["headline"]}, "post_caption": caption, "llm_ok": True, "slides": slides,
               "brain": {k: post[k] for k in ("stage", "segment", "insight", "objection", "hooks", "critic", "mechanic",
-                                      "research", "sources", "slides")}
+                                      "research", "sources", "slides", "dialog")}
               | {"image_mode": post["image"]["mode"], "image_provider": provider, "subline": post["subline"]}}
     return db.create_post(
         target=request.get("platform"), topic_id=request.get("topic_id"),

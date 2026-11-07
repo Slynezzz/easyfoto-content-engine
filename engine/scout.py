@@ -344,7 +344,9 @@ def run(cfg: Config, db: DB, ai: AI, today: date | None = None, now: datetime | 
 
 
 def save_topics(db: DB, res: dict) -> int:
-    """Темы для роликов по запросу: новости, тренды, проблемы аудитории, инфоповоды."""
+    """Темы для роликов по запросу: новости, тренды, проблемы аудитории, инфоповоды.
+    Новые новости и инфоповоды запоминаются как «горячие» — о них движок напишет сам."""
+    before = (db.one("SELECT MAX(id) m FROM topics") or {"m": 0})["m"] or 0
     n = 0
     for t in (res.get("topics") or [])[:12]:
         if not isinstance(t, dict):
@@ -359,4 +361,7 @@ def save_topics(db: DB, res: dict) -> int:
         if isinstance(e, dict) and e.get("title"):
             if db.add_topic("event", f"{e.get('date', '')} — {e['title']}".strip(" —"), str(e.get("note") or "")):
                 n += 1
+    hot = [r["id"] for r in db.q("SELECT id FROM topics WHERE id > ? AND kind IN ('news', 'event') "
+                                 "ORDER BY kind='news' DESC, id LIMIT 3", (before,))]
+    db.set("hot_topics", __import__("json").dumps(hot))
     return n

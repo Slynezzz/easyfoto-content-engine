@@ -62,7 +62,7 @@ class TGChannel:
         row = self.db.crosspost(post_id, "tg")
         if row and row["external_id"]:  # видео уже в канале — не дублируем
             return row["url"] or self._url(int(row["external_id"]))
-        is_post = post["format"] in ("post", "carousel")
+        is_post = post["format"] in ("post", "carousel", "dialog")
         media = Path((post["cover_path"] if is_post else post["video_path"]) or "")
         if not media.name or not media.exists():
             raise TGChannelError("файл " + ("картинки" if is_post else "ролика") + " уже удалён с тома")

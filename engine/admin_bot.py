@@ -25,7 +25,8 @@ from .telegram import TelegramAPI, TelegramError
 log = logging.getLogger(__name__)
 
 FORMAT_RU = {"before_after": "было → стало", "looks_carousel": "карусель образов", "worlds": "разные миры",
-             "post": "пост с картинкой", "carousel": "карусель"}
+             "post": "пост с картинкой", "carousel": "карусель", "dialog": "переписка с ботом"}
+KIND_RU = {"post": "пост", "carousel": "карусель", "dialog": "пост с перепиской"}
 STAGE_RU = {"reach": "охват", "trust": "доверие", "lead": "заявка"}
 
 HELP = """Команды:
@@ -186,7 +187,7 @@ class AdminBot:
             return False
         post = self.db.post(post_id)
         plan = json.loads(post["script_json"])
-        is_post = post["format"] in ("post", "carousel")
+        is_post = post["format"] in ("post", "carousel", "dialog")
         tags = " · ".join(x for x in (
             f"для: {platforms.label(post['target'])}" if post["target"] else "",
             FORMAT_RU.get(post["format"], post["format"]),
@@ -249,7 +250,7 @@ class AdminBot:
     def send_vk_package(self, post_id: int, text: str) -> bool:
         """Файл ролика и текст для ручной публикации в VK Клипы."""
         post = self.db.post(post_id)
-        is_post = bool(post) and post["format"] in ("post", "carousel")
+        is_post = bool(post) and post["format"] in ("post", "carousel", "dialog")
         path = (post["cover_path"] if is_post else post["video_path"]) if post else None
         if not path or not Path(path).exists():
             self.say(f"⚠️ VK: файл #{post_id} уже удалён — выложить не получится.")
@@ -944,6 +945,7 @@ class AdminBot:
             self.say(f"Что сделать для {platforms.label(pid)}?", {"inline_keyboard": [
                 [{"text": "🖼 Пост с картинкой", "callback_data": f"ck:{raw}:{pid}:post"}],
                 [{"text": "🗂 Карусель (обложка + слайды)", "callback_data": f"ck:{raw}:{pid}:carousel"}],
+                [{"text": "💬 Переписка с ботом (пример сценария)", "callback_data": f"ck:{raw}:{pid}:dialog"}],
                 [{"text": "🎬 Ролик", "callback_data": f"ck:{raw}:{pid}:reel"}]]})
             return
         if self.gen_paused:
@@ -952,15 +954,15 @@ class AdminBot:
         if not self.s.make_request:
             self.say("Создание по запросу недоступно.")
             return
-        if kind in ("post", "carousel"):
-            self.say(f"Пишу {'карусель' if kind == 'carousel' else 'пост'} для {platforms.label(pid)}: поиск фактов, "
+        if kind in ("post", "carousel", "dialog"):
+            self.say(f"Пишу {KIND_RU[kind]} для {platforms.label(pid)}: поиск фактов, "
                      "стратегия, 5 хуков, текст, проверка критиком и картинка — около 3–4 минут…")
         else:
             self.say(f"Собираю ролик для {platforms.label(pid)}: сценарий, новые кадры и музыка — это 3–6 минут…")
 
         def job():
             try:
-                post_id = (self.s.make_request(int(raw), pid, kind=kind) if kind in ("post", "carousel")
+                post_id = (self.s.make_request(int(raw), pid, kind=kind) if kind in ("post", "carousel", "dialog")
                            else self.s.make_request(int(raw), pid))
             except Exception as e:  # noqa: BLE001
                 self.say(f"⚠️ Не получилось: {e}")
@@ -1107,7 +1109,7 @@ class AdminBot:
                 mark("📲 Публикуешь вручную")
                 post = self.db.post(post_id)
                 self.say("Instagram ещё не подключён. " + (
-                    "Сохрани картинку выше и опубликуй как пост." if post["format"] == "post" else
+                    "Сохрани картинку выше и опубликуй как пост." if post["format"] in ("post", "dialog") else
                     "Сохрани обложку и слайды выше и опубликуй как карусель." if post["format"] == "carousel" else
                     "Сохрани видео выше и опубликуй как Reels, добавь трендовый звук в приложении.")
                     + " Текст поста — следующим сообщением.")
@@ -1140,10 +1142,8 @@ class AdminBot:
                 def job():
                     if old["topic_id"] and old["target"] and self.s.make_request:
                         try:
-                            new_id = (self.s.make_request(old["topic_id"], old["target"], kind="post")
-                                      if old["format"] == "post" else
-                                      self.s.make_request(old["topic_id"], old["target"], kind="carousel")
-                                      if old["format"] == "carousel" else
+                            new_id = (self.s.make_request(old["topic_id"], old["target"], kind=old["format"])
+                                      if old["format"] in ("post", "carousel", "dialog") else
                                       self.s.make_request(old["topic_id"], old["target"]))
                         except Exception as e:  # noqa: BLE001
                             self.say(f"⚠️ Не получилось: {e}")

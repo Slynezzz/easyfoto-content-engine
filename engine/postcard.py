@@ -45,28 +45,39 @@ def _fit_cover(im: Image.Image, author_photo: bool) -> Image.Image:
 
 def _tokens(text: str) -> list[tuple[str, bool]]:
     """«Вы *теряете* заявки» → [(Вы, False), (теряете, True), (заявки, False)]."""
-    out, accent = [], False
+    out, accent, prev = [], False, ""
     for i, part in enumerate(text.split("*")):
         accent = i % 2 == 1
-        out += [(w, accent) for w in part.split()]
+        words = part.split()
+        # «*ушёл*.» — точка вплотную к выделенному слову: не отрываем и не ставим пробел
+        if words and out and prev and not prev[-1].isspace() and not part[0].isspace():
+            out[-1] = (out[-1][0] + WJ, out[-1][1])
+        out += [(w, accent) for w in words]
+        prev = part or prev
     # короткие предлоги и союзы не висят в конце строки: слово, оканчивающееся неразрывным
     # пробелом, переносится только вместе со следующим (цвет у каждого свой)
     return [(w + NBSP, a) if i + 1 < len(out) and w.lower() in SHORT else (w, a) for i, (w, a) in enumerate(out)]
 
 
 NBSP = "\u00a0"
+WJ = "\u2060"  # «следующее слово без пробела и без переноса»
+
+
+def _glued(w: str) -> bool:
+    return w.endswith(NBSP) or w.endswith(WJ)
 
 
 def _line_width(tokens, font) -> float:
     space = font.getlength(" ")
-    return sum(font.getlength(w) + (0 if w.endswith(NBSP) else space) for w, _ in tokens) - (space if tokens else 0)
+    return (sum(font.getlength(w.rstrip(WJ)) + (0 if _glued(w) else space) for w, _ in tokens)
+            - (space if tokens else 0))
 
 
 def _wrap(tokens, font, width) -> list[list[tuple[str, bool]]]:
     units, cur = [], []
     for tok in tokens:  # «на» + «каждом» — одна неразрывная единица
         cur.append(tok)
-        if not tok[0].endswith(NBSP):
+        if not _glued(tok[0]):
             units.append(cur)
             cur = []
     if cur:
@@ -84,7 +95,7 @@ def _wrap(tokens, font, width) -> list[list[tuple[str, bool]]]:
 
 
 def _advance(font, w: str) -> float:
-    return font.getlength(w) + (0 if w.endswith(NBSP) else font.getlength(" "))
+    return font.getlength(w.rstrip(WJ)) + (0 if _glued(w) else font.getlength(" "))
 
 
 def _headline_layout(text: str, width: int, max_lines: int = 4):
@@ -104,7 +115,7 @@ def compose(image: Image.Image, headline: str, subline: str, out: Path, brand: s
     width = W - 2 * MARGIN
     font, lines = _headline_layout(headline or "", width)
     sub_font = _font(FONT_SEMI, 38)
-    sub_lines = _wrap([(w, False) for w in (subline or "").split()], sub_font, width)[:2]
+    sub_lines = _wrap(_tokens((subline or "").replace("*", "")), sub_font, width)[:2]
 
     ascent, descent = font.getmetrics()
     line_h = int((ascent + descent) * 1.02)
@@ -114,9 +125,9 @@ def compose(image: Image.Image, headline: str, subline: str, out: Path, brand: s
 
     # затемнение снизу: от прозрачного к тёмному под текстом
     shade = Image.new("L", (1, H), 0)
-    start = max(0, top - 260)
+    start = max(0, top - 340)
     for y in range(H):
-        a = 0 if y < start else min(225, int(225 * ((y - start) / max(1, H - start)) ** 0.8))
+        a = 0 if y < start else min(235, int(240 * ((y - start) / max(1, H - start)) ** 0.7))
         shade.putpixel((0, y), a)
     dark = Image.new("RGB", (W, H), (8, 15, 26))
     base = Image.composite(dark, base, shade.resize((W, H)))
@@ -127,13 +138,13 @@ def compose(image: Image.Image, headline: str, subline: str, out: Path, brand: s
     for ln in lines:
         x = MARGIN
         for w, accent in ln:
-            d.text((x, y), w, font=font, fill=ACCENT if accent else WHITE)
+            d.text((x, y), w.rstrip(WJ), font=font, fill=ACCENT if accent else WHITE)
             x += _advance(font, w)
         y += line_h
     if sub_lines:
         y += 24
         for ln in sub_lines:
-            d.text((MARGIN, y), "".join(w if w.endswith(NBSP) else w + " " for w, _ in ln).strip(), font=sub_font,
+            d.text((MARGIN, y), "".join(w.rstrip(WJ) if _glued(w) else w + " " for w, _ in ln).strip(), font=sub_font,
                    fill=SUB)
             y += sub_h
 
@@ -176,7 +187,7 @@ def _draw_rich(d: ImageDraw.ImageDraw, x: int, y: int, text: str, font, width: i
     for ln in lines:
         cx = x
         for w, accent in ln:
-            d.text((cx, y), w, font=font, fill=ACCENT if accent else color)
+            d.text((cx, y), w.rstrip(WJ), font=font, fill=ACCENT if accent else color)
             cx += _advance(font, w)
         y += lh
     return y
@@ -217,6 +228,74 @@ def slide(title: str, text: str, out: Path, index: int, total: int, brand: str =
     if not last:
         hint = "листайте →"
         d.text((W - MARGIN - ff.getlength(hint), foot_y), hint, font=ff, fill=ACCENT)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    im.save(out, "JPEG", quality=92)
+    return out
+
+
+# ------------------------------------------------------------------ макет переписки с ботом
+PANEL = (24, 36, 56)
+BOT_BUBBLE = (41, 56, 82)
+CLIENT_BUBBLE = (45, 212, 191)
+CLIENT_TEXT = (6, 30, 40)
+
+
+def _bubble_lines(text: str, font, width: int) -> list[str]:
+    lines = _wrap(_tokens(text.replace("*", "")), font, width)
+    return ["".join(w.rstrip(WJ) if _glued(w) else w + " " for w, _ in ln).strip() for ln in lines]
+
+
+def dialog_card(headline: str, dialog: dict, out: Path, label: str = "Пример сценария бота") -> Path:
+    """Карточка 4:5: заголовок и макет чата «клиент ↔ бот» — наглядный сценарий без картинки-нейросети."""
+    im = _background()
+    d = ImageDraw.Draw(im)
+    width = W - 2 * MARGIN
+    for size in (68, 62, 56, 50):
+        hf = _font(FONT_BOLD, size)
+        if len(_wrap(_tokens(headline), hf, width)) <= 3:
+            break
+    y = _draw_rich(d, MARGIN, MARGIN + 10, headline, hf, width, max_lines=3) + 36
+
+    px0, px1, py1 = MARGIN - 16, W - MARGIN + 16, H - MARGIN - 56
+    d.rounded_rectangle((px0, y, px1, py1), radius=36, fill=PANEL)
+    # шапка чата: аватар, имя бота, время
+    name = (dialog.get("bot_name") or "Бот компании")[:34]
+    d.ellipse((px0 + 28, y + 24, px0 + 92, y + 88), fill=ACCENT)
+    af = _font(FONT_BOLD, 34)
+    letter = name[:1].upper()
+    d.text((px0 + 60 - af.getlength(letter) / 2, y + 34), letter, font=af, fill=NAVY)
+    d.text((px0 + 112, y + 24), name, font=_font(FONT_SEMI, 32), fill=WHITE)
+    when = f"бот · онлайн · {dialog.get('time')}" if dialog.get("time") else "бот · онлайн"
+    d.text((px0 + 112, y + 62), when, font=_font(FONT_SEMI, 24), fill=MUTED)
+    d.line((px0 + 24, y + 112, px1 - 24, y + 112), fill=(46, 62, 88), width=2)
+
+    msgs = [m for m in (dialog.get("messages") or []) if isinstance(m, dict) and (m.get("text") or "").strip()]
+    top, bottom = y + 136, py1 - 28
+    inner = px1 - px0 - 56
+    for size in (34, 31, 28, 26):
+        mf = _font(FONT_SEMI, size)
+        lh = int(sum(mf.getmetrics()) * 1.18)
+        laid, cy = [], top
+        for m in msgs:
+            lines = _bubble_lines(m["text"].strip(), mf, int(inner * 0.74) - 48)
+            h = len(lines) * lh + 30
+            if cy + h > bottom:
+                break
+            laid.append((m, lines, cy, h))
+            cy += h + 18
+        if len(laid) == len(msgs) or size == 26:
+            break
+    for m, lines, by, h in laid:
+        client = m.get("from") == "client"
+        bw = max(mf.getlength(ln) for ln in lines) + 48
+        bx0 = px1 - 28 - bw if client else px0 + 28
+        d.rounded_rectangle((bx0, by, bx0 + bw, by + h), radius=26, fill=CLIENT_BUBBLE if client else BOT_BUBBLE)
+        ty = by + 14
+        for ln in lines:
+            d.text((bx0 + 24, ty), ln, font=mf, fill=CLIENT_TEXT if client else WHITE)
+            ty += lh
+    lf = _font(FONT_SEMI, 26)
+    d.text((MARGIN, H - MARGIN - 30), label, font=lf, fill=MUTED)
     out.parent.mkdir(parents=True, exist_ok=True)
     im.save(out, "JPEG", quality=92)
     return out

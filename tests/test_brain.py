@@ -45,6 +45,11 @@ class FakeAI:
                     "headline": "Заявки *уходят* ночью", "subline": "Что с этим делать",
                     "body": "Финальный текст после критика.", "hashtags": ["#бизнес", "#ии"]}
         d = json.loads(json.dumps(DRAFT))
+        if "ПОСТ С ПЕРЕПИСКОЙ" in prompt:
+            d["dialog"] = {"bot_name": "Агентство · помощник", "time": "23:40",
+                           "messages": [{"from": "client", "text": "Квартира ещё продаётся?"},
+                                        {"from": "bot", "text": "Да! Показать похожие?"},
+                                        {"from": "client", "text": "Да"}, {"from": "bot", "text": "Вот три варианта."}]}
         if "КАРУСЕЛЬ" in prompt:
             d["slides"] = [{"title": f"Слайд *{i}*", "text": "MAX — 50 млн пользователей по данным VK",
                             "source": "VK" if i == 1 else ""} for i in range(1, 5)]
@@ -180,6 +185,41 @@ class CarouselTests(BrainTests):
         api.send_media_group.return_value = [{"message_id": 7}]
         TGChannel(cfg, self.db, api).publish(pid)
         self.assertEqual(len(api.send_media_group.call_args.args[1]), 6)
+
+
+class DialogAndHotTests(BrainTests):
+    def test_dialog_post_without_image_model(self):
+        ai = FakeAI()
+        pid = brain.make_post(self.cfg, self.db, ai, self.req("vk"), kind="dialog")
+        post = self.db.post(pid)
+        self.assertEqual(post["format"], "dialog")
+        self.assertEqual(ai.image_prompts, [])                       # картинка — макет, без генерации
+        with Image.open(post["cover_path"]) as im:
+            self.assertEqual(im.size, (1080, 1350))
+        self.assertEqual(json.loads(post["script_json"])["brain"]["dialog"]["messages"][0]["from"], "client")
+
+    def test_headline_cleanup(self):
+        self.assertEqual(brain.clean_headline("«Нам рано *автоматизироваться*» — а клиент ушёл"),
+                         "Нам рано *автоматизироваться*, а клиент ушёл")
+        self.assertEqual(brain.clean_subline("Разбираю возражение: почему начинать с одного процесса"),
+                         "Почему начинать с одного процесса")
+        toks = postcard._tokens("клиент уже *ушёл*.")
+        self.assertEqual(toks[-2:], [("ушёл" + postcard.WJ, True), (".", False)])
+
+    def test_hot_topics_alert(self):
+        from engine import scout
+        from engine.app import Engine
+        scout.save_topics(self.db, {"topics": [{"kind": "news", "title": "MAX открыл ботов для бизнеса",
+                                                "angle": "что это значит", "source": "https://x.ru"},
+                                               {"kind": "trend", "title": "Карусели растут"}]})
+        eng = Engine.__new__(Engine)
+        eng.cfg, eng.db = self.cfg, self.db
+        said = []
+        eng.say = lambda text, markup=None: said.append((text, markup))
+        self.assertTrue(eng.hot_alert())
+        self.assertIn("MAX открыл ботов", said[0][0])
+        self.assertTrue(said[0][1]["inline_keyboard"][0][0]["callback_data"].startswith("ct:"))
+        self.assertFalse(eng.hot_alert())                             # второй раз — уже сообщили
 
 
 class ResearchFallbackTests(unittest.TestCase):

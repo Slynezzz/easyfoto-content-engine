@@ -175,7 +175,7 @@ class Instagram:
                     "POST", f"{self.account_id}/media", media_type="CAROUSEL",
                     children=",".join(c for c in children if c), caption=post["caption"] or "",
                 ).get("id")
-            elif post["format"] == "post":  # пост с картинкой 4:5
+            elif post["format"] in ("post", "dialog"):  # пост с картинкой 4:5
                 container = self._req(
                     "POST", f"{self.account_id}/media",
                     image_url=self.media_url(post["media_token"], "jpg"),
@@ -274,7 +274,7 @@ class Instagram:
         n = 0
         for r in rows:
             try:
-                self.db.add_metrics(r["id"], self.insights(r["ig_media_id"], image=r["format"] in ("post", "carousel")))
+                self.db.add_metrics(r["id"], self.insights(r["ig_media_id"], image=r["format"] in ("post", "carousel", "dialog")))
                 n += 1
             except IGError as e:
                 log.warning("insights #%s: %s", r["id"], e)
