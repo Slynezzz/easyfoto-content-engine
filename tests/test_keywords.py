@@ -20,6 +20,9 @@ class FakeIG:
 
     def _req(self, method, path, **params):
         self.calls.append((method, path, params))
+        if path == "1784/media":
+            return {"data": [{"id": "M1", "comments_count": len(self.comments), "timestamp": ts()},
+                             {"id": "M9", "comments_count": 0, "timestamp": ts()}]}
         if path.endswith("/comments"):
             return {"data": self.comments}
         if path.endswith("/messages") and self.fail_dm:
@@ -75,9 +78,12 @@ class KeywordTests(unittest.TestCase):
         self.assertIn(f"https://t.me/slyness_bot?start=utm_ig_kw_k{kid}p{self.pid}", text)
         self.assertTrue(any(c[1] == "c1/replies" for c in ig.calls))
         self.assertEqual(keywords.get(self.db, kid)["uses"], 1)
+        self.assertFalse([c for c in ig.calls if c[1] == "M9/comments"])     # без комментариев — не читаем
         ig.calls.clear()
         self.assertEqual(keywords.scan(self.cfg, self.db, ig)["replied"], 0)    # повторно не отвечаем
-        self.assertFalse([c for c in ig.calls if c[1].endswith("/messages")])
+        self.assertEqual([c[1] for c in ig.calls], ["1784/media"])              # новых нет — один запрос
+        ig.comments.append({"id": "c5", "text": "БОТ!", "username": "olga", "timestamp": ts()})
+        self.assertEqual(keywords.scan(self.cfg, self.db, ig)["replied"], 1)
 
     def test_scan_reports_permission_errors(self):
         keywords.add(self.db, "БОТ")
@@ -127,3 +133,34 @@ class KeywordTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TelegramMediaGroupTests(unittest.TestCase):
+    def test_caption_string_and_documents(self):
+        from engine.telegram import TelegramAPI
+        tmp = Path(tempfile.mkdtemp())
+        paths = []
+        for i in range(3):
+            p = tmp / f"{i}.jpg"
+            p.write_bytes(b"x")
+            paths.append(p)
+        api = TelegramAPI("T")
+        with mock.patch.object(api, "call", return_value=[{"message_id": 1}]) as call:
+            api.send_media_group(1, paths, "Подпись поста")
+            media = call.call_args.kwargs["media"]
+            self.assertEqual(media[0]["caption"], "Подпись поста")
+            self.assertNotIn("caption", media[1])
+            api.send_media_group(1, paths, as_documents=True)
+            self.assertEqual({m["type"] for m in call.call_args.kwargs["media"]}, {"document"})
+            api.send_media_group(1, paths, ["a", "b"])
+            self.assertEqual([m.get("caption") for m in call.call_args.kwargs["media"]], ["a", "b", None])
+
+
+class SafeUrlTests(unittest.TestCase):
+    def test_blocks_internal_addresses(self):
+        from engine import websearch
+        for bad in ("http://127.0.0.1/", "http://localhost:8080/", "http://10.0.0.5/x", "file:///etc/passwd",
+                    "http://postgres.railway.internal:5432", "http://169.254.169.254/latest/meta-data",
+                    "ftp://example.com/", "javascript:alert(1)"):
+            self.assertFalse(websearch.safe_url(bad), bad)
+            self.assertEqual(websearch.page_text(bad), "")

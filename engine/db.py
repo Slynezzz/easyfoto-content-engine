@@ -6,6 +6,7 @@ SQLite на Railway Volume — проще и надёжнее отдельной
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -131,6 +132,16 @@ CREATE TABLE IF NOT EXISTS lead_msgs (
 """
 
 
+_IDENT = re.compile(r"^[a-z_][a-z0-9_]{0,40}$")
+
+
+def ident(name: str) -> str:
+    """Имя столбца в динамическом SQL — только из кода, но проверяем: никаких кавычек и выражений."""
+    if not _IDENT.match(name):
+        raise ValueError(f"недопустимое имя столбца: {name!r}")
+    return name
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -222,14 +233,14 @@ class DB:
         for k in ("script_json", "asset_ids_json"):
             if k in fields and not isinstance(fields[k], str):
                 fields[k] = json.dumps(fields[k], ensure_ascii=False)
-        cols = ", ".join(fields)
+        cols = ", ".join(ident(k) for k in fields)
         marks = ", ".join("?" for _ in fields)
         return self.x(f"INSERT INTO posts({cols}) VALUES ({marks})", tuple(fields.values()))
 
     def update_post(self, post_id: int, **fields: Any) -> None:
         if not fields:
             return
-        sets = ", ".join(f"{k}=?" for k in fields)
+        sets = ", ".join(f"{ident(k)}=?" for k in fields)
         self.x(f"UPDATE posts SET {sets} WHERE id=?", (*fields.values(), post_id))
 
     def post(self, post_id: int) -> sqlite3.Row | None:
@@ -299,7 +310,7 @@ class DB:
 
     def update_crosspost(self, post_id: int, platform: str, **fields: Any) -> None:
         fields["updated_at"] = now_iso()
-        cols = ", ".join(f"{k}=?" for k in fields)
+        cols = ", ".join(f"{ident(k)}=?" for k in fields)
         self.x(f"UPDATE crossposts SET {cols} WHERE post_id=? AND platform=?",
                (*fields.values(), post_id, platform))
 

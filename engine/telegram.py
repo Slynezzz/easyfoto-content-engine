@@ -58,19 +58,6 @@ class TelegramAPI:
                          reply_parameters={"message_id": reply_to, "allow_sending_without_reply": True}
                          if reply_to else None)
 
-    def send_media_group(self, chat_id: int, paths: list, caption: str = "", as_documents: bool = False) -> list:
-        """Альбом до 10 фото (или файлов). Подпись — у первого элемента."""
-        kind = "document" if as_documents else "photo"
-        media, files = [], {}
-        for i, path in enumerate(paths[:10]):
-            key = f"f{i}"
-            item = {"type": kind, "media": f"attach://{key}"}
-            if i == 0 and caption:
-                item["caption"] = caption[:1024]
-            media.append(item)
-            files[key] = (Path(path).name, Path(path).read_bytes(), "image/jpeg")
-        return self.call("sendMediaGroup", files=files, chat_id=chat_id, media=media)
-
     def copy_message(self, chat_id: int, from_chat_id: int, message_id: int,
                      reply_markup: dict | None = None) -> dict:
         """Копия сообщения (текст, голосовое, фото, файл) без подписи «переслано от»."""
@@ -107,13 +94,17 @@ class TelegramAPI:
         files = {"audio": (Path(path).name, Path(path).read_bytes(), "audio/mpeg")}
         return self.call("sendAudio", http_timeout=120, files=files, chat_id=chat_id, caption=caption[:1024])
 
-    def send_media_group(self, chat_id: int, paths: list[str | Path], captions: list[str] | None = None) -> list:
-        """До 10 фото одним альбомом."""
+    def send_media_group(self, chat_id: int, paths: list[str | Path], captions: list[str] | str | None = None,
+                         as_documents: bool = False) -> list:
+        """До 10 фото (или файлов) одним альбомом. captions — строка (подпись к первому) или список подписей."""
+        if isinstance(captions, str):
+            captions = [captions]
+        kind = "document" if as_documents else "photo"
         files, media = {}, []
         for i, p in enumerate(paths[:10]):
             key = f"p{i}"
             files[key] = (Path(p).name, Path(p).read_bytes(), "image/jpeg")
-            item = {"type": "photo", "media": f"attach://{key}"}
+            item = {"type": kind, "media": f"attach://{key}"}
             if captions and i < len(captions) and captions[i]:
                 item["caption"] = captions[i][:1024]
             media.append(item)

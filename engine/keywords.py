@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 KINDS = ("magnet", "file", "link", "text")
 KIND_RU = {"magnet": "чек-лист бота", "file": "файл", "link": "ссылка", "text": "текст"}
 WORD_RE = re.compile(r"^[0-9A-Za-zА-Яа-яЁё]{2,24}$")
-SCAN_DAYS = 14          # комментарии под публикациями за последние 2 недели
+SCAN_DAYS = 7           # ответ в директ возможен на комментарий не старше 7 дней — старее не смотрим
 PRIVATE_REPLY_DAYS = 7  # Instagram разрешает ответ в директ на комментарий не старше 7 дней
 PUBLIC_REPLY = "Отправил в директ 📩"
 
@@ -167,20 +167,35 @@ def _ago(ts: str | None) -> timedelta:
 
 
 def scan(cfg: Config, db: DB, ig) -> dict:
-    """Проверяет свежие комментарии под публикациями и отвечает на кодовые слова. {"replied", "errors"}."""
+    """Проверяет свежие комментарии и отвечает на кодовые слова. {"replied", "errors"}.
+
+    Экономно к лимитам Instagram: один запрос — сколько комментариев у последних публикаций;
+    сами комментарии читаются только там, где их стало больше. Видит и публикации, выложенные вручную.
+    """
     out = {"replied": 0, "errors": []}
     if not all_(db) or not ig.ready():
         return out
     me = (db.get("ig_username") or "").lower()
-    since = (datetime.now(timezone.utc) - timedelta(days=SCAN_DAYS)).isoformat(timespec="seconds")
-    posts = db.q("SELECT id, ig_media_id FROM posts WHERE ig_media_id IS NOT NULL AND published_at >= ? "
-                 "ORDER BY id DESC LIMIT 30", (since,))
-    for p in posts:
+    try:
+        media = ig._req("GET", f"{ig.account_id}/media", fields="id,comments_count,timestamp",
+                        limit="25").get("data", [])
+    except Exception as e:  # noqa: BLE001
+        out["errors"].append(f"список публикаций: {e}")
+        return out
+    for m in media:
+        mid, count = str(m.get("id") or ""), int(m.get("comments_count") or 0)
+        if not mid or _ago(m.get("timestamp")) > timedelta(days=SCAN_DAYS):
+            continue
+        key = f"kwc:{mid}"
+        if count <= int(db.get(key, "0") or 0):
+            continue
+        post = db.one("SELECT id FROM posts WHERE ig_media_id=?", (mid,))
+        post_id = post["id"] if post else None
         try:
-            comments = ig._req("GET", f"{p['ig_media_id']}/comments", fields="id,text,username,timestamp",
+            comments = ig._req("GET", f"{mid}/comments", fields="id,text,username,timestamp",
                                limit="50").get("data", [])
-        except Exception as e:  # noqa: BLE001 — один пост не должен останавливать остальные
-            out["errors"].append(f"#{p['id']}: {e}")
+        except Exception as e:  # noqa: BLE001 — одна публикация не должна останавливать остальные
+            out["errors"].append(f"комментарии {mid}: {e}")
             continue
         for c in comments:
             cid = str(c.get("id") or "")
@@ -193,18 +208,18 @@ def scan(cfg: Config, db: DB, ig) -> dict:
                 continue
             if _ago(c.get("timestamp")) > timedelta(days=PRIVATE_REPLY_DAYS):
                 db.x("INSERT OR IGNORE INTO kw_events(comment_id, keyword_id, post_id, username, status, created_at) "
-                     "VALUES (?,?,?,?,?,?)", (cid, k["id"], p["id"], c.get("username"), "expired", now_iso()))
+                     "VALUES (?,?,?,?,?,?)", (cid, k["id"], post_id, c.get("username"), "expired", now_iso()))
                 continue
             status, err = "sent", None
             try:
                 ig._req("POST", f"{ig.account_id}/messages",
                         recipient=json.dumps({"comment_id": cid}),
-                        message=json.dumps({"text": dm_text(cfg, k, p["id"])}, ensure_ascii=False))
+                        message=json.dumps({"text": dm_text(cfg, k, post_id)}, ensure_ascii=False))
             except Exception as e:  # noqa: BLE001
                 status, err = "error", str(e)[:300]
                 out["errors"].append(f"{k['word']} от @{c.get('username')}: {e}")
             db.x("INSERT OR IGNORE INTO kw_events(comment_id, keyword_id, post_id, username, status, error, created_at) "
-                 "VALUES (?,?,?,?,?,?,?)", (cid, k["id"], p["id"], c.get("username"), status, err, now_iso()))
+                 "VALUES (?,?,?,?,?,?,?)", (cid, k["id"], post_id, c.get("username"), status, err, now_iso()))
             if status == "sent":
                 db.x("UPDATE keywords SET uses = uses + 1 WHERE id=?", (k["id"],))
                 out["replied"] += 1
@@ -212,4 +227,5 @@ def scan(cfg: Config, db: DB, ig) -> dict:
                     ig._req("POST", f"{cid}/replies", message=PUBLIC_REPLY)
                 except Exception as e:  # noqa: BLE001 — директ ушёл, ответ под комментарием не критичен
                     log.info("public reply %s: %s", cid, e)
+        db.set(key, str(count))  # неудачные ответы записаны в kw_events и придут владельцу в отчёте
     return out

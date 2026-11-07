@@ -28,7 +28,7 @@ def make_handler(media_dir: Path, routes: dict | None = None):
 
         def log_message(self, fmt, *args):  # в логи Railway — без токенов роликов и кодов входа
             line = MEDIA_TOKEN_RE.sub("/media/***", fmt % args)
-            log.info("%s %s", self.address_string(), re.sub(r"\?[^ ]*", "?***", line))
+            log.info("%s %s", self.address_string(), re.sub(r"\?[^ ]*", "?***", line)[:300])
 
         def _send_file(self, head_only: bool):
             m = MEDIA_RE.match(self.path.split("?", 1)[0])
@@ -91,8 +91,17 @@ def make_handler(media_dir: Path, routes: dict | None = None):
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
+                # страницы без скриптов: запрещаем исполнение JS, встраивание во фреймы и подмену типа
+                self.send_header("Content-Security-Policy",
+                                 "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; "
+                                 "form-action 'none'; frame-ancestors 'none'")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
                 self.end_headers()
                 self.wfile.write(body)
+                return
+            if len(self.path) > 2048:
+                self.send_error(414)
                 return
             if self.path in ("/", "/health"):
                 body = b"ok"

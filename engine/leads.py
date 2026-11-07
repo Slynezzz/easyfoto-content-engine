@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import funnel, keywords, niche
 from .config import Config
-from .db import DB, now_iso
+from .db import DB, ident, now_iso
 from .telegram import TelegramAPI, TelegramError
 
 log = logging.getLogger(__name__)
@@ -34,6 +34,8 @@ FORM_NUDGE_AFTER = timedelta(hours=2)
 MAGNET_NUDGE_AFTER = timedelta(hours=48)
 OWNER_REMIND_AFTER = timedelta(hours=24)
 ACK_EVERY_S = 1800  # «передал Максиму» — не чаще раза в полчаса
+RELAY_PER_HOUR = 20     # защита от спама: столько сообщений одного человека в час уходит владельцу
+CARDS_PER_DAY = 3       # и не больше трёх анкет с одного аккаунта в сутки (даже через /delete)
 STATUS_RU = {"new": "пришёл", "magnet": "взял чек-лист", "form": "заполняет анкету", "lead": "🔥 заявка",
              "contacted": "✅ на связи", "rejected": "🚫 не целевой"}
 SOURCE_RU = {**funnel.SOURCES, None: "без метки"}
@@ -95,7 +97,7 @@ def upsert(db: DB, user: dict, start_param: str | None = None):
 
 def update(db: DB, user_id: int, **fields) -> None:
     fields["updated_at"] = now_iso()
-    cols = ", ".join(f"{k}=?" for k in fields)
+    cols = ", ".join(f"{ident(k)}=?" for k in fields)
     db.x(f"UPDATE leads SET {cols} WHERE user_id=?", (*fields.values(), user_id))
 
 
@@ -137,7 +139,7 @@ def stats_text(db: DB, days: int = 7) -> str:
         return f"пришли {came} → чек-лист {magnet} → заявка на разбор {forms} → на связи {talk}"
 
     week = [r for r in rows if r["created_at"] >= since]
-    lines = [f"📥 Бот для заявок", f"За {days} дней: {funnel_line(week)}", f"За всё время: {funnel_line(rows)}", ""]
+    lines = ["📥 Бот для заявок", f"За {days} дней: {funnel_line(week)}", f"За всё время: {funnel_line(rows)}", ""]
     by_src: dict[str, list] = {}
     for r in rows:
         by_src.setdefault(SOURCE_RU.get(r["source"], r["source"] or "без метки"), []).append(r)
@@ -162,6 +164,21 @@ def stats_text(db: DB, days: int = 7) -> str:
 
 
 # ------------------------------------------------------------------ бот
+def _allow(db: DB, key: str, limit: int, window_s: int) -> bool:
+    """Скользящий счётчик в kv: True, если лимит в окне ещё не исчерпан (и засчитывает событие)."""
+    now = time.time()
+    try:
+        start, n = (float(x) for x in (db.get(key) or "0,0").split(","))
+    except ValueError:
+        start, n = 0.0, 0.0
+    if now - start > window_s:
+        start, n = now, 0
+    if n >= limit:
+        return False
+    db.set(key, f"{start},{n + 1}")
+    return True
+
+
 class LeadBot:
     def __init__(self, cfg: Config, db: DB, api: TelegramAPI, fallback_say=None):
         self.cfg, self.db, self.api = cfg, db, api
@@ -279,6 +296,8 @@ class LeadBot:
         if text == "/delete":
             self.db.x("DELETE FROM leads WHERE user_id=?", (uid,))
             self.db.x("DELETE FROM lead_msgs WHERE user_id=?", (uid,))
+            self.db.set(f"lead_ack:{uid}", "")
+            self.db.set(f"lead_rl:{uid}", "")
             self.api.send_message(uid, "Ваши данные удалены. Если захотите вернуться — нажмите /start.")
             return
         if text in ("/menu", "/help"):
@@ -358,6 +377,11 @@ class LeadBot:
 
     def finish(self, uid: int) -> None:
         row = get(self.db, uid)
+        if not _allow(self.db, f"lead_cards:{uid}", CARDS_PER_DAY, 86400):
+            update(self.db, uid, step=None)
+            self.api.send_message(uid, f"Заявка уже у {self.p['first_gen']} — он свяжется с вами. Если нужно что-то добавить, "
+                                       "просто напишите сюда.", {"remove_keyboard": True})
+            return
         update(self.db, uid, step=None, status="lead", form_at=row["form_at"] or now_iso())
         first = self.p["first"]
         tail = f"\n\nПока ждёте — разборы и кейсы в канале: {self.channel_url()}" if self.channel_url() else ""
@@ -388,6 +412,8 @@ class LeadBot:
 
     def relay_from_user(self, msg: dict, row) -> None:
         uid = msg["from"]["id"]
+        if not _allow(self.db, f"lead_rl:{uid}", RELAY_PER_HOUR, 3600):
+            return  # спам: владельцу не пересылаем
         who = row["name"] or "клиент"
         nick = f" @{row['username']}" if row["username"] else ""
         st = STATUS_RU.get(row["status"], row["status"])
@@ -446,7 +472,10 @@ class LeadBot:
             self.api.send_message(uid, f"Напишите сообщение здесь — я передам его {self.p['first_dat']}, "
                                        f"он ответит в этом чате.{contact}")
         elif data.startswith("lb:sph:") and row["step"] == "sphere":
-            i = int(data.split(":")[2])
+            raw = data.split(":")[2]
+            if not raw.isdigit() or int(raw) >= len(SPHERES):
+                return
+            i = int(raw)
             if SPHERES[i] == "Другое":
                 self.api.send_message(uid, "Напишите вашу сферу одним сообщением.")
                 return
@@ -551,6 +580,7 @@ def privacy_page(cfg: Config) -> str:
             "отправили, сообщения, которые вы пишете боту, и ссылка, по которой вы пришли.</p>"
             "<p><b>Зачем.</b> Чтобы связаться с вами по вашей заявке, подготовить бесплатный разбор и понимать, "
             "какие материалы полезны. Данные не продаются и не передаются третьим лицам.</p>"
-            "<p><b>Хранение.</b> В закрытой базе на сервере оператора, пока вы их не удалите.</p>"
+            "<p><b>Хранение.</b> В закрытой базе на сервере оператора, пока вы их не удалите. Для защиты от спама "
+            "бот сутки помнит только число отправленных с вашего аккаунта заявок — без ответов и контактов.</p>"
             "<p><b>Удаление.</b> Команда /delete в боте удаляет ваши данные сразу. Также можно написать оператору"
             + (f": {escape(p['contact'])}" if p["contact"] else "") + ".</p>")

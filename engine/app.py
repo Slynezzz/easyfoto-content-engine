@@ -605,7 +605,7 @@ class Engine:
             ("token", timedelta(days=7) if self.db.get("ig_token_seen_at") else timedelta(days=2), self.job_token),
             ("cleanup", timedelta(hours=12), self.job_cleanup),
             ("leads", timedelta(minutes=10), self.job_leads),
-            ("ig_comments", timedelta(minutes=3), self.job_ig_comments),
+            ("ig_comments", timedelta(minutes=5), self.job_ig_comments),
         ]
         for name, period, fn in jobs:
             if not self._every(name, period):

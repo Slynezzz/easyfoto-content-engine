@@ -128,16 +128,62 @@ def _strip(text: str) -> str:
     return _WS.sub(" ", html.unescape(_TAG.sub(" ", text or ""))).strip()
 
 
+MAX_PAGE_BYTES = 3_000_000
+
+
+def safe_url(url: str) -> bool:
+    """Только публичные http(s)-адреса: страницы из поиска не должны заставить сервер ходить
+    во внутреннюю сеть Railway (базы, служебные адреса) — защита от SSRF."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+    try:
+        u = urlparse(url)
+    except ValueError:
+        return False
+    if u.scheme not in ("http", "https") or not u.hostname:
+        return False
+    host = u.hostname.lower()
+    if host == "localhost" or host.endswith((".internal", ".local", ".railway.internal")):
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return False
+    return True
+
+
 def page_text(url: str, limit: int = 4000) -> str:
     """Основной текст страницы: без скриптов, меню и разметки. Пусто, если не вышло."""
+    if not safe_url(url):
+        return ""
     try:
-        r = requests.get(url, headers={"User-Agent": UA}, timeout=15)
-    except requests.RequestException:
+        r = requests.get(url, headers={"User-Agent": UA}, timeout=15, stream=True, allow_redirects=False)
+        hops = 0
+        while r.is_redirect and hops < 3:  # переходы — тоже только на публичные адреса
+            nxt = requests.compat.urljoin(url, r.headers.get("Location", ""))
+            r.close()
+            if not safe_url(nxt):
+                return ""
+            url, hops = nxt, hops + 1
+            r = requests.get(url, headers={"User-Agent": UA}, timeout=15, stream=True, allow_redirects=False)
+        if r.status_code != 200 or "html" not in r.headers.get("Content-Type", "html"):
+            r.close()
+            return ""
+        body = r.raw.read(MAX_PAGE_BYTES, decode_content=True)
+        r.close()
+    except (requests.RequestException, OSError, ValueError):
         return ""
-    if r.status_code != 200 or "html" not in r.headers.get("Content-Type", "html"):
-        return ""
-    r.encoding = r.encoding or r.apparent_encoding
-    return _strip(_DROP.sub(" ", r.text))[:limit]
+    enc = r.encoding or "utf-8"
+    try:
+        text = body.decode(enc, errors="replace")
+    except LookupError:
+        text = body.decode("utf-8", errors="replace")
+    return _strip(_DROP.sub(" ", text))[:limit]
 
 
 def gather(searcher: Searcher, queries: list[str], per_query: int = 4, read_pages: int = 6) -> list[Hit]:

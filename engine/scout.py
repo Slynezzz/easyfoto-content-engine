@@ -174,7 +174,7 @@ def merge_events(pb: dict, events: list, today: date) -> list[str]:
         scenes = [str(x)[:120] for x in (ev.get("scenes") or []) if str(x).strip()][:5]
         if not title or title.lower() in titles or len(scenes) < 2 or not (today <= day <= today + timedelta(days=30)):
             continue
-        uid = hashlib.md5(title.lower().encode()).hexdigest()[:8]
+        uid = hashlib.md5(title.lower().encode(), usedforsecurity=False).hexdigest()[:8]
         kept.append({"id": f"ev_{day:%m%d}_{uid}", "title": title, "date": day.isoformat(),
                      "scenes": scenes, "lead": 3, "after": 1, "weight": 2, "max_reels": 1,
                      "note": str(ev.get("why") or "")[:160]})

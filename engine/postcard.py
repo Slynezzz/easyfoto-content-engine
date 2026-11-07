@@ -134,7 +134,7 @@ def compose(image: Image.Image, headline: str, subline: str, out: Path, brand: s
 
     d = ImageDraw.Draw(base)
     y = top
-    space = font.getlength(" ")
+    font.getlength(" ")
     for ln in lines:
         x = MARGIN
         for w, accent in ln:
@@ -183,7 +183,7 @@ def _draw_rich(d: ImageDraw.ImageDraw, x: int, y: int, text: str, font, width: i
     lines = _wrap(_tokens(text), font, width)[:max_lines]
     a, ds = font.getmetrics()
     lh = int((a + ds) * line_k)
-    space = font.getlength(" ")
+    font.getlength(" ")
     for ln in lines:
         cx = x
         for w, accent in ln:

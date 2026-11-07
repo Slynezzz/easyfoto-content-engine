@@ -258,3 +258,26 @@ class CtaLinkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LeadAbuseTests(LeadBotTests):
+    def test_relay_rate_limit(self):
+        self.bot.handle(user_msg("/start"))
+        for i in range(30):
+            self.bot.handle(user_msg(f"спам {i}", mid=100 + i))
+        copies = [k for m, k in self.api.sent if m == "copy" and k["chat_id"] == OWNER]
+        self.assertEqual(len(copies), leads.RELAY_PER_HOUR)
+
+    def test_card_limit_survives_delete(self):
+        for _ in range(5):
+            self.run_form()
+            self.bot.handle(user_msg("/delete", mid=50))
+        cards = [m for m in self.api.to(OWNER) if "Заявка на бесплатный разбор" in m["text"]]
+        self.assertEqual(len(cards), leads.CARDS_PER_DAY)
+
+    def test_bad_callback_ignored(self):
+        self.bot.handle(user_msg("/start"))
+        self.bot.handle(cb("lb:form"))
+        self.bot.handle(cb("lb:sph:99"))
+        self.bot.handle(cb("lb:sph:x"))
+        self.assertEqual(leads.get(self.db, USER)["step"], "sphere")
