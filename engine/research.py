@@ -74,6 +74,20 @@ def run(cfg: Config, ai: AI, request: dict, today: date | None = None) -> dict:
             + (f"Подача: {request['angle']}\n" if request.get("angle") else "")
             + f"Сегодня {today:%d.%m.%Y}.\n\n{FACTS_SCHEMA}")
     failures = []
+    if (cfg.search_provider or "").lower() == "perplexity":  # модель, которая ищет сама
+        from .scout import _via_perplexity
+        try:
+            res, sources = _via_perplexity(cfg, FACTS_SYSTEM, task)
+            out = _clean(res if isinstance(res, dict) else {})
+            known = {s.get("uri") for s in sources if s.get("uri")}
+            for f in out["facts"]:
+                if f["url"] and known and f["url"] not in known:
+                    f["url"] = ""
+            out["method"] = "Perplexity с поиском"
+            if out["facts"]:
+                return out
+        except AIError as e:
+            failures.append(f"Perplexity: {e}")
     try:
         searcher = websearch.from_config(cfg)
     except websearch.SearchError as e:
