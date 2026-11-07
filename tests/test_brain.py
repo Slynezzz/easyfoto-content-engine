@@ -310,3 +310,62 @@ class AdminCreatePostTests(unittest.TestCase):
     def test_youtube_skips_kind_question(self):
         self.cb(f"cp:{self.tid}:yt")
         self.assertEqual(self.calls, [(self.tid, "yt", "reel")])
+
+
+class SafetyAndTopicsTests(unittest.TestCase):
+    def test_copy_of_reference_is_detected(self):
+        tmp = Path(tempfile.mkdtemp())
+        ref = tmp / "me.jpg"
+        src = Image.new("RGB", (800, 1000), (200, 150, 120))
+        from PIL import ImageDraw
+        ImageDraw.Draw(src).ellipse((200, 200, 600, 700), fill=(40, 40, 40))
+        src.save(ref)
+        same = Image.open(ref).convert("RGB").resize((1024, 1536))
+        self.assertTrue(brain.looks_like_copy(same, [str(ref)]))
+        other = Image.new("RGB", (1024, 1536), (20, 60, 160))
+        self.assertFalse(brain.looks_like_copy(other, [str(ref)]))
+
+    def test_edits_respects_reference_limit(self):
+        from engine import llm
+        tmp = Path(tempfile.mkdtemp())
+        refs = []
+        for i in range(6):
+            p = tmp / f"r{i}.jpg"
+            Image.new("RGB", (10, 10)).save(p)
+            refs.append(str(p))
+        sent = []
+
+        def fake_post(url, files=None, **kw):
+            sent.append(len(files or []))
+            if len(sent) == 1 and len(files) > 3:
+                raise AIError("HTTP 400: at most 3 input images are supported")
+            return {"data": [{"b64_json": __import__("base64").b64encode(png()).decode()}]}
+
+        with mock.patch.object(llm, "_post", fake_post):
+            res = llm.AI._edits_image("https://x", "k", "m", "p", refs)
+        self.assertEqual(sent, [4, 3])          # не больше 4, а при отказе — сколько разрешила модель
+        self.assertEqual(res.provider, "edits")
+
+    def test_create_without_topics_starts_search(self):
+        from engine.admin_bot import AdminBot, Services
+        tmp = Path(tempfile.mkdtemp())
+        cfg = Config(data_dir=tmp, niche="expert", admin_chat_id=1)
+        cfg.ensure_dirs()
+        db = DB(cfg.db_path)
+        api = mock.Mock()
+        api.send_message.return_value = {"message_id": 1}
+        calls = []
+
+        def scout():
+            calls.append(1)
+            db.add_topic("news", "MAX открыл ботов для бизнеса", "", "")
+            return "Тренды обновлены"
+        bot = AdminBot(cfg, db, api, Services(make_one=lambda: 0, instagram_ready=lambda: False,
+                                              run_analysis=lambda: "", stats_text=lambda: "", scout_trends=scout))
+        bot.run_bg = lambda fn: fn()
+        bot.on_command("/create", [])
+        self.assertEqual(calls, [1])
+        last = api.send_message.call_args.args
+        self.assertIn("MAX открыл ботов", json.dumps(last[2], ensure_ascii=False))
+        bot.on_command("/create", [])           # темы уже есть — второй поиск не нужен
+        self.assertEqual(calls, [1])

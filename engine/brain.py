@@ -321,8 +321,29 @@ def used_sources(body: str, facts: list[dict], limit: int = 4) -> list[dict]:
     return out[:limit]
 
 
-AUTHOR_SCENE_HINT = ("Реалистичная фотография, журнальный стиль. Человек — автор, его лицо как на фото-образцах. "
-                     "Кадр по пояс, лицо в верхней трети. Никакого текста и логотипов в кадре.")
+AUTHOR_SCENE_HINT = ("Реалистичная фотография, журнальный стиль. Человек — автор: с фото-образцов бери только его "
+                     "лицо, черты, мимику и телосложение; сцену, одежду, позу и фон создавай заново по описанию, "
+                     "исходные фото не повторяй. Лицо в верхней половине кадра. Никакого текста и логотипов.")
+
+
+def _thumb(im) -> list[int]:
+    return list(im.convert("L").resize((32, 32)).getdata())
+
+
+def looks_like_copy(im, refs: list[str], threshold: float = 14.0) -> bool:
+    """Защита: исходные фото автора не должны попасть в пост «как есть» (даже чуть изменёнными)."""
+    from PIL import Image
+    a = _thumb(im)
+    for path in refs:
+        try:
+            with Image.open(path) as r:
+                from PIL import ImageOps
+                b = _thumb(ImageOps.fit(r.convert("RGB"), im.size))
+        except OSError:
+            continue
+        if sum(abs(x - y) for x, y in zip(a, b)) / len(a) < threshold:
+            return True
+    return False
 
 
 def picture(cfg: Config, db: DB, ai: AI, image: dict) -> tuple["object", str]:
@@ -331,7 +352,12 @@ def picture(cfg: Config, db: DB, ai: AI, image: dict) -> tuple["object", str]:
     if image.get("mode") == "author":
         refs = images.pick_refs(db)
         scene = {**image, "light": f"{image.get('light') or 'мягкий естественный свет'}. {AUTHOR_SCENE_HINT}"}
-        return images._generate_image(cfg, ai, refs, scene)
+        for attempt in range(2):
+            im, provider = images._generate_image(cfg, ai, refs, scene)
+            if not looks_like_copy(im, refs):
+                return im, provider
+            log.warning("картинка автора слишком похожа на исходное фото, попытка %s", attempt + 1)
+        raise AIError("модель вернула почти исходное фото вместо новой сцены — попробуйте ещё раз")
     prompt = (postcard.ILLUSTRATION_PROMPT + "\nКартинка:\n"
               f"  Смысл: {image.get('title', '')}\n  Где: {image.get('where', '')}\n"
               f"  Что происходит: {image.get('doing', '')}\n  Детали: {image.get('around', '')}\n"

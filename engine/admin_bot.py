@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -692,7 +693,7 @@ class AdminBot:
                     self.say(f"Ролик #{post_id} собран, отправлю его чуть позже.")
             self.run_bg(job)
         elif cmd in ("/create", "/new"):
-            self.say(*self.create_menu())
+            self.open_create()
         elif cmd == "/occasions":
             self.say(self.s.occasions_text())
         elif cmd == "/make" and self.gen_paused:
@@ -879,11 +880,28 @@ class AdminBot:
             rows.append([{"text": f"{icon} {t['title'][:56]}{used}", "callback_data": f"ct:{t['id']}"}])
         rows.append([{"text": "✍️ Своя тема или задача", "callback_data": "ct:new"}])
         rows.append([{"text": "🔎 Обновить тренды и новости", "callback_data": "ct:scout"}])
-        text = ("Выберите тему ролика — новость, тренд, инфоповод или проблему аудитории (✓ — уже делали ролик), "
-                "либо напишите свою. Затем выберете площадку.")
+        text = ("Выберите тему — новость, тренд, инфоповод или проблему аудитории (✓ — уже делали), "
+                "либо напишите свою: бот превратит её в контент по правилам. Затем — площадка и формат.")
         if len(rows) == 2:
-            text = "Тем пока нет: обновите тренды и новости или напишите свою тему."
+            text = ("Найденных тем пока нет — уже ищу свежие новости, тренды и проблемы ниши, список пришлю "
+                    "через 1–2 минуты. А пока можно написать свою тему.")
         return text, {"inline_keyboard": rows}
+
+    def open_create(self) -> None:
+        """Меню тем; если тем нет — сразу запускает поиск и присылает меню повторно."""
+        text, kb = self.create_menu()
+        self.say(text, kb)
+        started = float(self.db.get("scout_running", "0") or 0)
+        if len(kb["inline_keyboard"]) == 2 and time.time() - started > 600:  # не запускаем поиск дважды
+            self.db.set("scout_running", str(time.time()))
+
+            def job():
+                try:
+                    self.say(self.s.scout_trends())
+                finally:
+                    self.db.set("scout_running", "0")
+                self.say(*self.create_menu())
+            self.run_bg(job)
 
     def platform_keyboard(self, topic_id: int | None) -> dict:
         rows = [[{"text": f"{p['emoji']} {p['title']}", "callback_data": f"cp:{topic_id}:{pid}"}]
@@ -893,7 +911,7 @@ class AdminBot:
     def on_create_callback(self, cq: dict, data: str) -> None:
         self.api.answer_callback(cq["id"])
         if data == "ct:menu":
-            self.say(*self.create_menu())
+            self.open_create()
             return
         if data == "ct:new":
             self.db.set("await_topic", "1")

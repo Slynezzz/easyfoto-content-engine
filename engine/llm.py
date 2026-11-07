@@ -43,6 +43,7 @@ class AIHTTPError(AIError):
 ROUTE_MISMATCH = (400, 404, 405, 415, 501)
 
 # Ответы, по которым видно: дело в модели (нет у посредника, временно отключена).
+MAX_EDIT_REFS = 4  # gpt-image принимает не больше 4 фото-образцов; лишние только мешают
 MODEL_TROUBLE = re.compile(
     r"unknown model|no such model|invalid model|model_not_found|no available channel|"
     r"temporarily unavailable|model[^.;]{0,60}(not found|not exist|does not exist|unavailable|"
@@ -650,10 +651,14 @@ class AI:
             if not img:
                 raise AIRefused("посредник не вернул изображение")
             return ImageResult(img[0], img[1], "generations")
-        files = []
-        for p in refs[:10]:
-            p = Path(p)
-            files.append(("image[]", (p.name, p.read_bytes(), mimetypes.guess_type(p.name)[0] or "image/jpeg")))
+        def pack(paths):
+            out = []
+            for p in paths:
+                p = Path(p)
+                out.append(("image[]", (p.name, p.read_bytes(), mimetypes.guess_type(p.name)[0] or "image/jpeg")))
+            return out
+
+        files = pack(refs[:MAX_EDIT_REFS])
         form = {"model": model, "prompt": prompt, "size": "1024x1536", "quality": "high", "input_fidelity": "high"}
         headers = {"Authorization": f"Bearer {key}"}
         url = f"{base}/v1/images/edits"
@@ -661,11 +666,15 @@ class AI:
             data = _post(url, timeout=240, headers=headers, data=form, files=files, retries=2,
                          retry_timeouts=False)
         except AIError as e:
-            # input_fidelity и quality понимают не все модели — повторяем без них.
-            if not any(x in str(e) for x in ("input_fidelity", "quality")):
+            limit = re.search(r"at most (\d+) input images", str(e))
+            if limit:  # у модели свой предел фото-образцов — повторяем с ним
+                files = pack(refs[: max(1, int(limit.group(1)))])
+            elif any(x in str(e) for x in ("input_fidelity", "quality")):
+                # input_fidelity и quality понимают не все модели — повторяем без них.
+                form.pop("input_fidelity", None)
+                form.pop("quality", None)
+            else:
                 raise
-            form.pop("input_fidelity", None)
-            form.pop("quality", None)
             data = _post(url, timeout=240, headers=headers, data=form, files=files, retries=2,
                          retry_timeouts=False)
         img = extract_image(data)
