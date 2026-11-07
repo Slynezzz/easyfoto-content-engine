@@ -188,7 +188,7 @@ class LegalPagesTests(unittest.TestCase):
     def test_pages_for_google_branding(self):
         from engine import server
         pages = server.legal_pages("@Easyfotobot")
-        self.assertEqual(set(pages), {"/home", "/privacy", "/terms"})
+        self.assertEqual(set(pages), {"/home", "/privacy", "/terms", "/data-deletion"})
         self.assertIn("не передаются третьим лицам", pages["/privacy"]({}))
         self.assertIn("t.me/Easyfotobot", pages["/home"]({}))
 
