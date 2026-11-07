@@ -7,9 +7,11 @@ instagram_business_content_publish (для статистики — instagram_bu
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import requests
 
@@ -164,7 +166,16 @@ class Instagram:
     def _create_and_publish(self, post_id: int, post, max_wait_s: int, poll_s: int) -> str:
         container = post["ig_container_id"]
         if not container:
-            if post["format"] == "post":  # пост с картинкой 4:5
+            if post["format"] == "carousel":  # карусель: обложка + слайды <token>_<n>.jpg
+                slides = json.loads(post["script_json"] or "{}").get("slides") or []
+                tokens = [post["media_token"]] + [Path(x).stem for x in slides]
+                children = [self._req("POST", f"{self.account_id}/media", is_carousel_item="true",
+                                      image_url=self.media_url(t, "jpg")).get("id") for t in tokens[:10]]
+                container = self._req(
+                    "POST", f"{self.account_id}/media", media_type="CAROUSEL",
+                    children=",".join(c for c in children if c), caption=post["caption"] or "",
+                ).get("id")
+            elif post["format"] == "post":  # пост с картинкой 4:5
                 container = self._req(
                     "POST", f"{self.account_id}/media",
                     image_url=self.media_url(post["media_token"], "jpg"),
@@ -189,7 +200,7 @@ class Instagram:
             if status == "FINISHED":
                 break
             if status in ("ERROR", "EXPIRED"):
-                raise IGError(f"Instagram не принял {'картинку' if post['format'] == 'post' else 'видео'}: {status}")
+                raise IGError(f"Instagram не принял {'видео' if post['format'] not in ('post', 'carousel') else 'картинку'}: {status}")
             if status == "PUBLISHED":
                 media_id = self._find_published(post["caption"] or "")
                 if not media_id:
@@ -263,7 +274,7 @@ class Instagram:
         n = 0
         for r in rows:
             try:
-                self.db.add_metrics(r["id"], self.insights(r["ig_media_id"], image=r["format"] == "post"))
+                self.db.add_metrics(r["id"], self.insights(r["ig_media_id"], image=r["format"] in ("post", "carousel")))
                 n += 1
             except IGError as e:
                 log.warning("insights #%s: %s", r["id"], e)

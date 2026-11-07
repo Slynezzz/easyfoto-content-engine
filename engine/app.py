@@ -102,10 +102,10 @@ class Engine:
             raise ValueError("тема не найдена — откройте /create заново")
         req = {"title": t["title"], "angle": t["angle"] or "", "url": t["url"] or "",
                "platform": platform, "topic_id": t["id"]}
-        if kind == "post":
+        if kind in ("post", "carousel"):
             if self.gen_paused():
                 raise RuntimeError("генерация остановлена — включить: /run или кнопка в /status")
-            post_id = brain.make_post(self.cfg, self.db, self.ai, req)
+            post_id = brain.make_post(self.cfg, self.db, self.ai, req, kind)
         else:
             post_id = self.make_one(request=req)
         self.db.x("UPDATE topics SET used_at=? WHERE id=?",
@@ -194,7 +194,7 @@ class Engine:
             platforms.append("yt")
         if self.tg.ready():
             platforms.append("tg")
-        if post["format"] == "post":  # пост с картинкой: в YouTube нельзя, во VK — вручную (стена)
+        if post["format"] in ("post", "carousel"):  # картинки: в YouTube нельзя, во VK — вручную (стена)
             platforms = [("vk_manual" if p == "vk" else p) for p in platforms if p != "yt"]
             if "vk_manual" not in platforms and (self.vk.can_autopublish() or self.cfg.vk_manual):
                 platforms.append("vk_manual")
@@ -508,7 +508,8 @@ class Engine:
         """
         cutoff = (self.now() - timedelta(days=keep_days)).astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
         rows = self.db.q(
-            "SELECT id, video_path, cover_path FROM posts WHERE video_path IS NOT NULL AND ("
+            "SELECT id, video_path, cover_path, media_token FROM posts WHERE "
+            "(video_path IS NOT NULL OR cover_path IS NOT NULL) AND ("
             "(status='rejected') OR (status IN ('published','manual','xpost') AND COALESCE(published_at, created_at) < ?)) "
             "AND id NOT IN (SELECT post_id FROM crossposts WHERE status IN ('queued','publishing','failed'))",
             (cutoff,))
@@ -517,6 +518,9 @@ class Engine:
             for f in (r["video_path"], r["cover_path"]):
                 if f:
                     Path(f).unlink(missing_ok=True)
+            if r["media_token"]:  # слайды карусели
+                for f in self.cfg.media_dir.glob(f"{r['media_token']}_*.jpg"):
+                    f.unlink(missing_ok=True)
             self.db.update_post(r["id"], video_path=None, cover_path=None)
             n += 1
         return n

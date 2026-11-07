@@ -49,29 +49,42 @@ def _tokens(text: str) -> list[tuple[str, bool]]:
     for i, part in enumerate(text.split("*")):
         accent = i % 2 == 1
         out += [(w, accent) for w in part.split()]
-    # короткие предлоги и союзы не висят в конце строки: «в 9:15», «и как» — одним словом
-    glued: list[tuple[str, bool]] = []
-    for w, a in out:
-        if glued and glued[-1][0].lower() in SHORT and glued[-1][1] == a:
-            prev, _ = glued.pop()
-            glued.append((prev + "\u00a0" + w, a))
-        else:
-            glued.append((w, a))
-    return glued
+    # короткие предлоги и союзы не висят в конце строки: слово, оканчивающееся неразрывным
+    # пробелом, переносится только вместе со следующим (цвет у каждого свой)
+    return [(w + NBSP, a) if i + 1 < len(out) and w.lower() in SHORT else (w, a) for i, (w, a) in enumerate(out)]
+
+
+NBSP = "\u00a0"
+
+
+def _line_width(tokens, font) -> float:
+    space = font.getlength(" ")
+    return sum(font.getlength(w) + (0 if w.endswith(NBSP) else space) for w, _ in tokens) - (space if tokens else 0)
 
 
 def _wrap(tokens, font, width) -> list[list[tuple[str, bool]]]:
-    lines, cur = [], []
-    for tok in tokens:
-        trial = " ".join(w for w, _ in cur + [tok])
-        if cur and font.getlength(trial) > width:
-            lines.append(cur)
-            cur = [tok]
-        else:
-            cur.append(tok)
+    units, cur = [], []
+    for tok in tokens:  # «на» + «каждом» — одна неразрывная единица
+        cur.append(tok)
+        if not tok[0].endswith(NBSP):
+            units.append(cur)
+            cur = []
     if cur:
-        lines.append(cur)
+        units.append(cur)
+    lines, line = [], []
+    for u in units:
+        if line and _line_width(line + u, font) > width:
+            lines.append(line)
+            line = list(u)
+        else:
+            line += u
+    if line:
+        lines.append(line)
     return lines
+
+
+def _advance(font, w: str) -> float:
+    return font.getlength(w) + (0 if w.endswith(NBSP) else font.getlength(" "))
 
 
 def _headline_layout(text: str, width: int, max_lines: int = 4):
@@ -79,7 +92,7 @@ def _headline_layout(text: str, width: int, max_lines: int = 4):
     for size in range(92, 47, -4):
         font = _font(FONT_BOLD, size)
         lines = _wrap(toks, font, width)
-        if len(lines) <= max_lines and all(font.getlength(" ".join(w for w, _ in ln)) <= width for ln in lines):
+        if len(lines) <= max_lines and all(_line_width(ln, font) <= width for ln in lines):
             return font, lines
     font = _font(FONT_BOLD, 48)
     return font, _wrap(toks, font, width)[:max_lines]
@@ -115,12 +128,13 @@ def compose(image: Image.Image, headline: str, subline: str, out: Path, brand: s
         x = MARGIN
         for w, accent in ln:
             d.text((x, y), w, font=font, fill=ACCENT if accent else WHITE)
-            x += font.getlength(w) + space
+            x += _advance(font, w)
         y += line_h
     if sub_lines:
         y += 24
         for ln in sub_lines:
-            d.text((MARGIN, y), " ".join(w for w, _ in ln), font=sub_font, fill=SUB)
+            d.text((MARGIN, y), "".join(w if w.endswith(NBSP) else w + " " for w, _ in ln).strip(), font=sub_font,
+                   fill=SUB)
             y += sub_h
 
     if brand:
@@ -135,4 +149,74 @@ def compose(image: Image.Image, headline: str, subline: str, out: Path, brand: s
 
     out.parent.mkdir(parents=True, exist_ok=True)
     base.save(out, "JPEG", quality=92)
+    return out
+
+
+# ------------------------------------------------------------------ слайды карусели
+NAVY = (15, 27, 45)
+MUTED = (148, 163, 184)
+
+
+def _background() -> Image.Image:
+    """Тёмно-синий фон с мягким бирюзовым свечением в углу — единый стиль всех слайдов."""
+    base = Image.new("RGB", (W, H), NAVY)
+    glow = Image.new("L", (W, H), 0)
+    gd = ImageDraw.Draw(glow)
+    for r in range(700, 0, -20):
+        gd.ellipse((W - r, -r, W + r, r), fill=int(70 * (1 - r / 700)))
+    return Image.composite(Image.new("RGB", (W, H), (20, 184, 166)), base, glow)
+
+
+def _draw_rich(d: ImageDraw.ImageDraw, x: int, y: int, text: str, font, width: int, color=WHITE,
+               line_k: float = 1.12, max_lines: int = 99) -> int:
+    lines = _wrap(_tokens(text), font, width)[:max_lines]
+    a, ds = font.getmetrics()
+    lh = int((a + ds) * line_k)
+    space = font.getlength(" ")
+    for ln in lines:
+        cx = x
+        for w, accent in ln:
+            d.text((cx, y), w, font=font, fill=ACCENT if accent else color)
+            cx += _advance(font, w)
+        y += lh
+    return y
+
+
+def slide(title: str, text: str, out: Path, index: int, total: int, brand: str = "", source: str = "",
+          last: bool = False) -> Path:
+    """Слайд с мыслью: номер, заголовок с акцентом, текст, источник цифры, подвал с автором."""
+    im = _background()
+    d = ImageDraw.Draw(im)
+    width = W - 2 * MARGIN
+    d.text((MARGIN, MARGIN), f"{index:02d} / {total:02d}", font=_font(FONT_SEMI, 30), fill=ACCENT)
+    y = MARGIN + 110
+    for size in (76, 68, 60, 54):
+        tf = _font(FONT_BOLD, size)
+        if len(_wrap(_tokens(title), tf, width)) <= 3:
+            break
+    y = _draw_rich(d, MARGIN, y, title, tf, width, max_lines=4) + 40
+    d.rectangle((MARGIN, y, MARGIN + 90, y + 6), fill=ACCENT)
+    y += 50
+    body_lines = None
+    for size in (44, 40, 36, 33):
+        bf = _font(FONT_SEMI, size)
+        body_lines = _wrap(_tokens(text), bf, width)
+        if y + len(body_lines) * int(sum(bf.getmetrics()) * 1.3) < H - 230:
+            break
+    _draw_rich(d, MARGIN, y, text, bf, width, color=SUB, line_k=1.3, max_lines=12)
+    foot_y = H - MARGIN - 34
+    if source:
+        sf = _font(FONT_SEMI, 26)
+        src = f"Источник: {source}"
+        while sf.getlength(src) > width and len(src) > 20:
+            src = src[:-2].rstrip() + "…"
+        d.text((MARGIN, foot_y - 56), src, font=sf, fill=MUTED)
+    ff = _font(FONT_SEMI, 28)
+    if brand:
+        d.text((MARGIN, foot_y), brand, font=ff, fill=MUTED)
+    if not last:
+        hint = "листайте →"
+        d.text((W - MARGIN - ff.getlength(hint), foot_y), hint, font=ff, fill=ACCENT)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    im.save(out, "JPEG", quality=92)
     return out

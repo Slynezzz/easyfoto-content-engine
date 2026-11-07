@@ -58,6 +58,19 @@ class TelegramAPI:
                          reply_parameters={"message_id": reply_to, "allow_sending_without_reply": True}
                          if reply_to else None)
 
+    def send_media_group(self, chat_id: int, paths: list, caption: str = "", as_documents: bool = False) -> list:
+        """Альбом до 10 фото (или файлов). Подпись — у первого элемента."""
+        kind = "document" if as_documents else "photo"
+        media, files = [], {}
+        for i, path in enumerate(paths[:10]):
+            key = f"f{i}"
+            item = {"type": kind, "media": f"attach://{key}"}
+            if i == 0 and caption:
+                item["caption"] = caption[:1024]
+            media.append(item)
+            files[key] = (Path(path).name, Path(path).read_bytes(), "image/jpeg")
+        return self.call("sendMediaGroup", files=files, chat_id=chat_id, media=media)
+
     def copy_message(self, chat_id: int, from_chat_id: int, message_id: int,
                      reply_markup: dict | None = None) -> dict:
         """Копия сообщения (текст, голосовое, фото, файл) без подписи «переслано от»."""

@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -61,13 +62,17 @@ class TGChannel:
         row = self.db.crosspost(post_id, "tg")
         if row and row["external_id"]:  # видео уже в канале — не дублируем
             return row["url"] or self._url(int(row["external_id"]))
-        is_post = post["format"] == "post"
+        is_post = post["format"] in ("post", "carousel")
         media = Path((post["cover_path"] if is_post else post["video_path"]) or "")
         if not media.name or not media.exists():
             raise TGChannelError("файл " + ("картинки" if is_post else "ролика") + " уже удалён с тома")
         head, rest = self._split(self.text_for(post))
         try:
-            if is_post:
+            if post["format"] == "carousel":
+                slides = [media] + [Path(x) for x in json.loads(post["script_json"] or "{}").get("slides") or []]
+                msgs = self.api.send_media_group(self.cfg.tg_channel_id, [x for x in slides if x.exists()], head)
+                msg = msgs[0]
+            elif is_post:
                 msg = self.api.send_photo(self.cfg.tg_channel_id, media, head)
             else:
                 msg = self.api.send_video(self.cfg.tg_channel_id, media, head, cover=post["cover_path"])

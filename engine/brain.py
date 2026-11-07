@@ -19,7 +19,7 @@ import secrets
 from collections import Counter
 from pathlib import Path
 
-from . import brief, images, niche, platforms, postcard
+from . import brief, images, niche, platforms, postcard, research
 from . import playbook as pbm
 from .config import Config
 from .db import DB
@@ -42,7 +42,7 @@ def strategy() -> dict:
 
 def _recent(db: DB, n: int = HISTORY) -> list[dict]:
     out = []
-    for r in db.q("SELECT id, script_json FROM posts WHERE format='post' AND status != 'rejected' "
+    for r in db.q("SELECT id, script_json FROM posts WHERE format IN ('post', 'carousel') AND status != 'rejected' "
                   "ORDER BY id DESC LIMIT ?", (n,)):
         try:
             b = json.loads(r["script_json"] or "{}").get("brain") or {}
@@ -129,6 +129,15 @@ WRITE_SCHEMA = """Схема ответа:
   }}
 }}"""
 
+CAROUSEL_SCHEMA = """
+Это КАРУСЕЛЬ: обложка (заголовок + картинка) и слайды. Добавь в ответ:
+  "slides": [{{"title": "мысль слайда до 45 символов, 1 слово в *звёздочках*",
+              "text": "раскрытие до 230 символов: факт с цифрой, шаг или пример — одна мысль",
+              "source": "источник цифры на слайде (если есть цифра), иначе пусто"}}, ... от 4 до 6 слайдов],
+  "cta_slide": {{"title": "призыв до 45 символов", "text": "до 160 символов — по правилам этапа и площадки"}}
+Слайды идут логикой: ответ на заголовок → факты → что делать → вывод. Каждый слайд понятен сам по себе.
+Поле "body" для карусели — подпись 600–1200 символов: суть, зачем листать, призыв; детали — на слайдах."""
+
 CRITIC_SYSTEM = """Ты — редактор-критик в команде маркетинга эксперта. Твоя задача — чтобы пост привёл заявки.
 Проверь черновик строго по чек-листу и перепиши всё слабое. Не добавляй фактов, которых нет в брифе,
 теме и черновике. Сохрани смысл, этап воронки и правила площадки. Отвечай ТОЛЬКО JSON."""
@@ -140,7 +149,8 @@ CRITIC_SCHEMA = """Схема ответа:
   "headline": "финальный заголовок на картинку до 60 символов, 1–2 слова в *звёздочках*",
   "subline": "финальный подзаголовок до 70 символов",
   "body": "финальный текст поста",
-  "hashtags": ["..."]
+  "hashtags": ["..."],
+  "slides": [...] и "cta_slide": {...} — только если они есть в черновике (карусель): те же поля, исправленные
 }"""
 
 
@@ -150,13 +160,25 @@ def _clip(s: str, n: int) -> str:
 
 
 def write_prompt(request: dict, stage: str, segment: str | None, author_ok: bool, strat: dict,
-                 audiences: dict, winners: list[str], trends: list[str]) -> str:
+                 audiences: dict, winners: list[str], trends: list[str], facts: str = "") -> str:
     st = strat["stages"][stage]
     pl = platforms.get(request.get("platform")) or platforms.get("tg")
+    length = strat.get("length", {}).get(request.get("platform") or "tg", "1500–2500 символов")
     lines = [
         f"ТЕМА (заказ владельца): {request.get('title', '')}",
+        "Заголовок и текст — строго про эту тему, её ключевые слова — в заголовке или первой строке. "
+        "Подменять тему другой (даже близкой) нельзя.",
         *( [f"Как подать: {request['angle']}"] if request.get("angle") else []),
         *( [f"Источник (не выдумывай сверх него): {request['url']}"] if request.get("url") else []),
+        "",
+        facts or research.facts_block({}),
+        "",
+        "ТРЕБОВАНИЯ К ТЕКСТУ (пост должен быть «мясом» — причиной читать, сохранять, пересылать):",
+        "- Заголовок — обещание или вопрос; текст ОБЯЗАН прямо и конкретно ответить на него в первых двух абзацах.",
+        "- Фактура: минимум 3 факта с цифрами из исследования, с названием источника в тексте; цифр вне списка — ни одной.",
+        "- Структура: цепляющая первая строка → прямой ответ / главный тезис → аргументы с фактами (можно списком) → "
+        "практическая часть: что конкретно сделать, пример сценария из жизни сегмента → короткий вывод → призыв этапа.",
+        f"- Объём текста: {length}. Каждое предложение несёт информацию: без воды, общих слов и цепочек риторических вопросов.",
         "",
         f"ЭТАП ВОРОНКИ: {st['title']} — {st['goal']}.",
         "Подходящие углы: " + "; ".join(st["angles"]),
@@ -189,17 +211,22 @@ def write_prompt(request: dict, stage: str, segment: str | None, author_ok: bool
     return "\n".join(lines)
 
 
-def critic_prompt(draft: dict, request: dict, stage: str, strat: dict) -> str:
+def critic_prompt(draft: dict, request: dict, stage: str, strat: dict, facts: str = "") -> str:
     pl = platforms.get(request.get("platform")) or platforms.get("tg")
+    length = strat.get("length", {}).get(request.get("platform") or "tg", "1500–2500 символов")
     return "\n".join([
         f"Тема: {request.get('title', '')}",
+        f"Объём текста: {length}",
+        facts or research.facts_block({}),
+        "Если в тексте есть цифра, которой нет в фактах, — убери её или замени фактом из списка.",
         f"Этап воронки: {strat['stages'][stage]['title']} — {strat['stages'][stage]['goal']}",
         f"Площадка: {pl['rules']}",
         "",
         "ЧЕК-ЛИСТ:", *[f"  {i + 1}. {c}" for i, c in enumerate(strat["critic"])],
         "",
         "ЧЕРНОВИК:",
-        json.dumps({k: draft.get(k) for k in ("headline", "subline", "body", "hashtags", "objection", "insight")},
+        json.dumps({k: draft.get(k) for k in ("headline", "subline", "body", "hashtags", "objection", "insight",
+                                              "slides", "cta_slide") if draft.get(k) is not None},
                    ensure_ascii=False, indent=1),
         "",
         CRITIC_SCHEMA,
@@ -216,7 +243,7 @@ def _ask(ai: AI, cfg: Config, system: str, prompt: str) -> dict:
     return ai.json(system, prompt)
 
 
-def write(cfg: Config, db: DB, ai: AI, request: dict) -> dict:
+def write(cfg: Config, db: DB, ai: AI, request: dict, kind: str = "post") -> dict:
     """Текст поста и сцена картинки. Возвращает dict с полями поста и метаданными стратегии."""
     strat = strategy()
     pb = pbm.load(cfg.playbook_path)
@@ -226,8 +253,12 @@ def write(cfg: Config, db: DB, ai: AI, request: dict) -> dict:
     segment = pick_segment(recent, audiences)
     author_ok = author_allowed(db, recent)
     system = SYSTEM.format(brief=brief.load(cfg) or "(бриф не задан)")
+    found = research.run(cfg, ai, request)
+    facts = research.facts_block(found)
     prompt = write_prompt(request, stage, segment, author_ok, strat, audiences,
-                          lead_winners(db), pb.get("trend_notes", []))
+                          lead_winners(db), pb.get("trend_notes", []), facts)
+    if kind == "carousel":
+        prompt += "\n" + CAROUSEL_SCHEMA.replace("{{", "{").replace("}}", "}")
     try:
         draft = _ask(ai, cfg, system, prompt)
     except AIError as e:
@@ -238,8 +269,8 @@ def write(cfg: Config, db: DB, ai: AI, request: dict) -> dict:
     final, critic = dict(draft), {}
     try:
         critic = _ask(ai, cfg, CRITIC_SYSTEM + "\n\nБРИФ:\n" + (brief.load(cfg) or ""),
-                      critic_prompt(draft, request, stage, strat))
-        for k in ("headline", "subline", "body", "hashtags"):
+                      critic_prompt(draft, request, stage, strat, facts))
+        for k in ("headline", "subline", "body", "hashtags", "slides", "cta_slide"):
             if critic.get(k):
                 final[k] = critic[k]
     except AIError as e:
@@ -265,7 +296,29 @@ def write(cfg: Config, db: DB, ai: AI, request: dict) -> dict:
         "hashtags": tags,
         "image": image,
         "critic": {"scores": critic.get("scores") or {}, "fixes": (critic.get("fixes") or [])[:6]},
+        "research": {"method": found.get("method", ""), "error": found.get("error", ""),
+                     "facts": found.get("facts", [])},
+        "sources": used_sources(final.get("body", "") + " " + " ".join(
+            str(x.get("source", "")) + " " + str(x.get("text", "")) for x in (final.get("slides") or [])
+            if isinstance(x, dict)), found.get("facts", [])),
+        "slides": [{"title": _clip(x.get("title", ""), 60), "text": _clip(x.get("text", ""), 260),
+                    "source": _clip(x.get("source", ""), 70)}
+                   for x in (final.get("slides") or []) if isinstance(x, dict) and x.get("title")][:6],
+        "cta_slide": final.get("cta_slide") if isinstance(final.get("cta_slide"), dict) else None,
     }
+
+
+def used_sources(body: str, facts: list[dict], limit: int = 4) -> list[dict]:
+    """Источники фактов, которые попали в текст (по названию источника); иначе первые из списка."""
+    low = (body or "").lower()
+    with_url = [f for f in facts if f.get("url")]
+    used = [f for f in with_url if f.get("source") and f["source"].lower()[:20] in low]
+    out, seen = [], set()
+    for f in used or with_url:
+        if f["url"] not in seen:
+            seen.add(f["url"])
+            out.append({"source": f.get("source") or f["url"], "url": f["url"]})
+    return out[:limit]
 
 
 AUTHOR_SCENE_HINT = ("Реалистичная фотография, журнальный стиль. Человек — автор, его лицо как на фото-образцах. "
@@ -293,14 +346,46 @@ def picture(cfg: Config, db: DB, ai: AI, image: dict) -> tuple["object", str]:
         raise AIError("посредник вернул не картинку") from None
 
 
-def compose_caption(post: dict) -> str:
+def compose_caption(post: dict, platform: str | None = None) -> str:
+    """Текст поста; в Telegram и VK — с источниками (там ссылки работают), в Instagram — без ссылок."""
+    text = post["body"].strip()
+    if platform in ("tg", "vk") and post.get("sources"):
+        text += "\n\nИсточники:\n" + "\n".join(f"— {s['source']}: {s['url']}" for s in post["sources"])
     tags = " ".join(post["hashtags"])
-    return post["body"].strip() + (f"\n\n{tags}" if tags else "")
+    return text + (f"\n\n{tags}" if tags else "")
 
 
-def make_post(cfg: Config, db: DB, ai: AI, request: dict) -> int:
-    """Пост с картинкой по теме для площадки. Сохраняет пост со статусом 'rendered'."""
-    post = write(cfg, db, ai, request)
+def cta_fallback(cfg: Config, platform: str | None) -> dict:
+    bot = (cfg.bot_username or "").lstrip("@")
+    if platform == "ig" or not bot:
+        return {"title": "Сохраните, чтобы *не потерять*",
+                "text": "Больше разборов и бесплатный чек-лист «12 задач для бота» — по ссылке в профиле."}
+    return {"title": "Бесплатный *разбор* вашей задачи",
+            "text": f"Чек-лист «12 задач для бота» и бесплатный разбор вашего процесса — в боте @{bot}."}
+
+
+def render_slides(cfg: Config, post: dict, token: str, platform: str | None, brand: str) -> list[str]:
+    """Слайды 2..N карусели (обложка — отдельно). Файлы <token>_<n>.jpg рядом с обложкой."""
+    slides = post.get("slides") or []
+    cta = post.get("cta_slide") or cta_fallback(cfg, platform)
+    total = len(slides) + 2
+    paths = []
+    for i, sl in enumerate(slides, start=2):
+        out = cfg.media_dir / f"{token}_{i}.jpg"
+        postcard.slide(sl["title"], sl["text"], out, i, total, brand=brand, source=sl.get("source", ""))
+        paths.append(str(out))
+    out = cfg.media_dir / f"{token}_{total}.jpg"
+    postcard.slide(cta.get("title") or cta_fallback(cfg, platform)["title"], cta.get("text") or "", out,
+                   total, total, brand=brand, last=True)
+    paths.append(str(out))
+    return paths
+
+
+def make_post(cfg: Config, db: DB, ai: AI, request: dict, kind: str = "post") -> int:
+    """Пост с картинкой (kind="post") или карусель (kind="carousel"). Сохраняет со статусом 'rendered'."""
+    post = write(cfg, db, ai, request, kind)
+    if kind == "carousel" and len(post["slides"]) < 3:
+        raise BrainError("копирайтер не написал слайды карусели — попробуйте ещё раз")
     try:
         im, provider = picture(cfg, db, ai, post["image"])
     except AIError as e:
@@ -311,13 +396,17 @@ def make_post(cfg: Config, db: DB, ai: AI, request: dict) -> int:
     postcard.compose(im, post["headline"], post["subline"], out,
                      brand=f"{nic.get('lead_author', '')} · AI-архитектор".strip(" ·"),
                      author_photo=post["image"].get("mode") == "author")
-    script = {"script": {"hook": post["headline"]}, "post_caption": compose_caption(post), "llm_ok": True,
-              "brain": {k: post[k] for k in ("stage", "segment", "insight", "objection", "hooks", "critic", "mechanic")}
+    brand = f"{nic.get('lead_author', '')} · AI-архитектор".strip(" ·")
+    slides = render_slides(cfg, post, token, request.get("platform"), brand) if kind == "carousel" else []
+    caption = compose_caption(post, request.get("platform"))
+    script = {"script": {"hook": post["headline"]}, "post_caption": caption, "llm_ok": True, "slides": slides,
+              "brain": {k: post[k] for k in ("stage", "segment", "insight", "objection", "hooks", "critic", "mechanic",
+                                      "research", "sources", "slides")}
               | {"image_mode": post["image"]["mode"], "image_provider": provider, "subline": post["subline"]}}
     return db.create_post(
         target=request.get("platform"), topic_id=request.get("topic_id"),
-        status="rendered", format="post", hook_id=f"post_{post['mechanic']}",
+        status="rendered", format=kind, hook_id=f"post_{post['mechanic']}",
         theme=f"stage_{post['stage']}", audience=post["segment"], explore=0,
         script_json=json.dumps(script, ensure_ascii=False), asset_ids_json=[],
-        video_path=None, cover_path=str(out), caption=compose_caption(post), media_token=token,
+        video_path=None, cover_path=str(out), caption=caption, media_token=token,
     )
