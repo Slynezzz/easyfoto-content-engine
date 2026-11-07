@@ -113,7 +113,8 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
         if errors:
             db.set("last_image_error", errors[-1][:300])
         # подписи должны соответствовать реально получившимся кадрам
-        gplan.script["captions"] = [planner._clip(r["title"] or "", planner.LIMITS["caption"]) for r in rows]
+        gplan.script["captions"] = [planner._clip(r["title"] or "", planner.caption_limit(niche.load(cfg.niche)))
+                                    for r in rows]
         return rows, gplan
 
     order = [from_generation, from_library] if (want_new and has_refs) else [from_library]
@@ -141,6 +142,10 @@ def produce(cfg: Config, db: DB, ai: AI, pb: dict, today: date,
     before = None
     if choice.format == "before_after":
         before = sorted(befores, key=lambda r: (r["used_count"], rng.random()))[0]
+
+    if request and request.get("facts_block"):  # эксперт: редактор-критик проверяет сценарий до сборки
+        from . import brain
+        plan = brain.polish_reel(cfg, ai, plan, request)
 
     paths = [p["path"] for p in photos]
     script = plan.to_script()

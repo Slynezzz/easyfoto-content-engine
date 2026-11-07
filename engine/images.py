@@ -256,13 +256,51 @@ def _generate_image(cfg: Config, ai: AI, refs: list[str], scene: dict) -> tuple[
     return im, res.provider
 
 
+AUTHOR_SCENE_HINT = ("Реалистичная фотография, журнальный стиль. Человек — автор: с фото-образцов бери только его "
+                     "лицо, черты, мимику и телосложение; сцену, одежду, позу и фон создавай заново по описанию, "
+                     "исходные фото не повторяй. Лицо в верхней половине кадра. Никакого текста и логотипов.")
+
+
+def _gray32(im) -> list[int]:
+    return list(im.convert("L").resize((32, 32)).getdata())
+
+
+def looks_like_copy(im, refs: list[str], threshold: float = 14.0) -> bool:
+    """Защита: исходные фото автора не должны попасть в пост «как есть» (даже чуть изменёнными)."""
+    from PIL import Image
+    a = _gray32(im)
+    for path in refs:
+        try:
+            with Image.open(path) as r:
+                from PIL import ImageOps
+                b = _gray32(ImageOps.fit(r.convert("RGB"), im.size))
+        except OSError:
+            continue
+        if sum(abs(x - y) for x, y in zip(a, b)) / len(a) < threshold:
+            return True
+    return False
+
+
+def author_image(cfg: Config, ai: AI, refs: list[str], scene: dict) -> tuple[Image.Image, str]:
+    """Кадр с автором: сходство по фото «реф», сцена новая; исходное фото «как есть» не пропускаем."""
+    scene = {**scene, "light": f"{scene.get('light') or 'мягкий естественный свет'}. {AUTHOR_SCENE_HINT}"}
+    for attempt in range(2):
+        im, provider = _generate_image(cfg, ai, refs, scene)
+        if not looks_like_copy(im, refs):
+            return im, provider
+        log.warning("кадр автора слишком похож на исходное фото, попытка %s", attempt + 1)
+    raise AIError("модель вернула почти исходное фото вместо новой сцены")
+
+
 def generate(cfg: Config, db: DB, ai: AI, scene: dict, theme: str) -> int:
-    """Генерирует кадр по сцене и сохраняет в базу. Возвращает id нового фото."""
-    refs = [] if illustration_mode(cfg) else pick_refs(db)
+    """Генерирует кадр по сцене и сохраняет в базу. Возвращает id нового фото.
+    В режиме иллюстраций сцена с "author": true — кадр с автором по его фото «реф»."""
+    author = illustration_mode(cfg) and scene.get("author") and pick_refs(db)
+    refs = pick_refs(db) if (author or not illustration_mode(cfg)) else []
     if not refs and not illustration_mode(cfg):
         raise AIError("нет фото лица: пришли в админ-бот свои фото с подписью «реф» или «до»")
     _spend_image_budget(cfg, db)
-    im, _ = _generate_image(cfg, ai, refs, scene)
+    im, _ = author_image(cfg, ai, refs, scene) if author else _generate_image(cfg, ai, refs, scene)
     out = cfg.assets_dir / "generated" / f"{uuid.uuid4().hex[:12]}.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
     im.save(out, "JPEG", quality=92)

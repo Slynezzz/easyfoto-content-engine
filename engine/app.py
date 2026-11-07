@@ -108,6 +108,8 @@ class Engine:
                 raise RuntimeError("генерация остановлена — включить: /run или кнопка в /status")
             post_id = brain.make_post(self.cfg, self.db, self.ai, req, kind)
         else:
+            if niche.load(self.cfg.niche).get("posts"):  # эксперт: факты, этап воронки, автор в кадре
+                req.update(brain.reel_context(self.cfg, self.db, self.ai, req))
             post_id = self.make_one(request=req)
         self.db.x("UPDATE topics SET used_at=? WHERE id=?",
                   (self.now().astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds"), t["id"]))

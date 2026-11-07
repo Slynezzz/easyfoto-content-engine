@@ -366,29 +366,10 @@ def used_sources(body: str, facts: list[dict], limit: int = 4) -> list[dict]:
     return out[:limit]
 
 
-AUTHOR_SCENE_HINT = ("Реалистичная фотография, журнальный стиль. Человек — автор: с фото-образцов бери только его "
-                     "лицо, черты, мимику и телосложение; сцену, одежду, позу и фон создавай заново по описанию, "
-                     "исходные фото не повторяй. Лицо в верхней половине кадра. Никакого текста и логотипов.")
+AUTHOR_SCENE_HINT = images.AUTHOR_SCENE_HINT
 
 
-def _thumb(im) -> list[int]:
-    return list(im.convert("L").resize((32, 32)).getdata())
-
-
-def looks_like_copy(im, refs: list[str], threshold: float = 14.0) -> bool:
-    """Защита: исходные фото автора не должны попасть в пост «как есть» (даже чуть изменёнными)."""
-    from PIL import Image
-    a = _thumb(im)
-    for path in refs:
-        try:
-            with Image.open(path) as r:
-                from PIL import ImageOps
-                b = _thumb(ImageOps.fit(r.convert("RGB"), im.size))
-        except OSError:
-            continue
-        if sum(abs(x - y) for x, y in zip(a, b)) / len(a) < threshold:
-            return True
-    return False
+looks_like_copy = images.looks_like_copy  # совместимость
 
 
 def picture(cfg: Config, db: DB, ai: AI, image: dict) -> tuple["object", str]:
@@ -396,13 +377,7 @@ def picture(cfg: Config, db: DB, ai: AI, image: dict) -> tuple["object", str]:
     images._spend_image_budget(cfg, db)
     if image.get("mode") == "author":
         refs = images.pick_refs(db)
-        scene = {**image, "light": f"{image.get('light') or 'мягкий естественный свет'}. {AUTHOR_SCENE_HINT}"}
-        for attempt in range(2):
-            im, provider = images._generate_image(cfg, ai, refs, scene)
-            if not looks_like_copy(im, refs):
-                return im, provider
-            log.warning("картинка автора слишком похожа на исходное фото, попытка %s", attempt + 1)
-        raise AIError("модель вернула почти исходное фото вместо новой сцены — попробуйте ещё раз")
+        return images.author_image(cfg, ai, refs, image)
     prompt = (postcard.ILLUSTRATION_PROMPT + "\nКартинка:\n"
               f"  Смысл: {image.get('title', '')}\n  Где: {image.get('where', '')}\n"
               f"  Что происходит: {image.get('doing', '')}\n  Детали: {image.get('around', '')}\n"
@@ -486,3 +461,76 @@ def make_post(cfg: Config, db: DB, ai: AI, request: dict, kind: str = "post") ->
         script_json=json.dumps(script, ensure_ascii=False), asset_ids_json=[],
         video_path=None, cover_path=str(out), caption=caption, media_token=token,
     )
+
+
+# ------------------------------------------------------------------ ролики эксперта
+REEL_CRITIC_SCHEMA = """Схема ответа (те же поля, исправленные; число подписей — ровно как было):
+{
+  "fixes": ["что исправлено", ...],
+  "hook": "до 60 символов, 1–2 слова в *звёздочках*, без кавычек и тире",
+  "captions": ["подпись кадра 1 — тот же смысл кадра, до %d символов", ...],
+  "cta_title": "до 24 символов, одно слово в *звёздочках*",
+  "cta_sub": "до 55 символов",
+  "post_caption": "текст поста к ролику"
+}"""
+
+
+def reel_context(cfg: Config, db: DB, ai: AI, request: dict) -> dict:
+    """Для ролика эксперта: факты по теме, этап воронки, возражения, можно ли показать автора."""
+    strat = strategy()
+    recent = _recent(db)
+    stage = request.get("stage") or pick_stage(recent, strat)
+    st = strat["stages"][stage]
+    found = research.run(cfg, ai, request)
+    return {
+        "facts_block": research.facts_block(found),
+        "facts": found.get("facts", []),
+        "research_method": found.get("method", ""),
+        "stage": stage,
+        "stage_text": f"{st['title']} — {st['goal']}. Призыв: {st['cta']}.",
+        "objections": strat["objections"][:4],
+        "author_ok": bool(images.pick_refs(db)),
+    }
+
+
+def polish_reel(cfg: Config, ai: AI, plan, request: dict):
+    """Редактор-критик для сценария ролика: хук раскрыт, тезисы с фактами, цифры только из фактов."""
+    from . import planner
+    strat = strategy()
+    nic = niche.load(cfg.niche)
+    cap = planner.caption_limit(nic)
+    sc = plan.script
+    draft = {"hook": sc.get("hook"), "captions": sc.get("captions"), "cta_title": sc.get("cta_title"),
+             "cta_sub": sc.get("cta_sub"), "post_caption": plan.post_caption}
+    pl = platforms.get(request.get("platform")) or platforms.get("ig")
+    prompt = "\n".join([
+        f"Тема ролика: {request.get('title', '')}",
+        f"Этап воронки: {request.get('stage_text', '')}",
+        f"Площадка: {pl['rules']}",
+        request.get("facts_block") or "",
+        "Если в тексте есть цифра, которой нет в фактах, — убери её или замени фактом из списка.",
+        "Подписи идут по кадрам: каждая должна остаться про свой кадр, но стать законченным тезисом.",
+        "", "ЧЕК-ЛИСТ:", *[f"  {i + 1}. {c}" for i, c in enumerate(strat["critic"])],
+        "", "ЧЕРНОВИК:", json.dumps(draft, ensure_ascii=False, indent=1), "", REEL_CRITIC_SCHEMA % cap,
+    ])
+    try:
+        res = _ask(ai, cfg, CRITIC_SYSTEM + "\n\nБРИФ:\n" + (brief.load(cfg) or ""), prompt)
+    except AIError as e:
+        log.warning("reel critic failed: %s", e)
+        return plan
+    caps = res.get("captions")
+    if isinstance(caps, list) and len(caps) == len(sc.get("captions") or []):
+        sc["captions"] = [planner._clip(str(c), cap) or old for c, old in zip(caps, sc["captions"])]
+    if res.get("hook"):
+        sc["hook"] = planner._clip(clean_headline(str(res["hook"])), planner.LIMITS["hook"])
+    for k in ("cta_title", "cta_sub"):
+        if res.get(k):
+            sc[k] = planner._clip(str(res[k]), planner.LIMITS[k])
+    text = str(res.get("post_caption") or "").replace("*", "").strip()
+    if len(text) >= 80:
+        plan.post_caption = text[: planner.LIMITS["post_caption"]]
+    sources = used_sources(plan.post_caption, request.get("facts") or [])
+    if request.get("platform") in ("tg", "vk") and sources:
+        plan.post_caption += "\n\nИсточники:\n" + "\n".join(f"— {s['source']}: {s['url']}" for s in sources)
+    plan.script = sc
+    return plan

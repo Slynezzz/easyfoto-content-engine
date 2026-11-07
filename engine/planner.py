@@ -37,7 +37,7 @@ SYSTEM = """Ты — сценарист коротких вертикальны�
 SCHEMA_HINT = """Схема ответа:
 {{
   "hook": "заголовок на первые 2 секунды, до 60 символов, по мотивам паттерна хука; 1–2 ключевых слова оберни в *звёздочки* — они будут выделены цветом",
-  "captions": ["подпись к кадру 1, до 22 символов", ... ровно {n} шт.],
+  "captions": ["подпись к кадру 1, до {cap} символов", ... ровно {n} шт.],
   {scenes_hint}"cta_title": "финальный призыв, до 24 символов, одно ключевое слово в *звёздочках*",
   "cta_sub": "подзаголовок призыва, до 55 символов, {cta_sub_hint}",
   "post_caption": "текст поста 250–700 символов: первая строка цепляет ситуацией сегмента; дальше короткая история или польза и снятие возражения; повод переслать ролик конкретному другу; вопрос для комментариев; {caption_cta_hint}",
@@ -118,6 +118,20 @@ def request_lines(request: dict | None) -> list[str]:
     pl = platforms.get(request.get("platform"))
     if pl:
         lines.append(f"ПЛОЩАДКА: {pl['rules']}")
+    if request.get("facts_block"):  # эксперт: исследование, этап воронки, возражение
+        lines += ["", request["facts_block"], "",
+                  "ТРЕБОВАНИЯ К РОЛИКУ: хук — обещание или вопрос по теме; подписи кадров — цепочка законченных "
+                  "тезисов: ответ на хук → факты с цифрами (только из фактов выше) → что сделать → вывод; "
+                  "каждая подпись понятна без звука. Текст поста раскрывает тему с фактами и источниками "
+                  "(«по данным …»), без воды."]
+    if request.get("stage_text"):
+        lines.append(f"ЭТАП ВОРОНКИ: {request['stage_text']}")
+    if request.get("objections"):
+        lines.append("Если уместно, сними одно возражение: " + "; ".join(request["objections"]))
+    if request.get("author_ok"):
+        lines.append("Можно показать автора: в 1 кадре из всех (личный момент — автор за работой, у моря, "
+                     "объясняет) поставь в сцене \"author\": true и опиши, что он делает и во что одет. "
+                     "Остальные кадры — иллюстрации без людей крупно.")
     return lines
 
 
@@ -162,25 +176,32 @@ def build_prompt(pb: dict, choice: Choice, n: int, photo_notes: list[str] | None
     lines += request_lines(request)
     lines.append("")
     hint = (nic.get("scenes_hint") or SCENES_HINT).format(n=n)
-    lines.append(SCHEMA_HINT.format(n=n, scenes_hint=hint if generate_scenes else "",
+    lines.append(SCHEMA_HINT.format(n=n, scenes_hint=hint if generate_scenes else "", cap=caption_limit(nic) - 2,
                                     cta_sub_hint=nic["cta_sub_hint"], caption_cta_hint=nic["caption_cta_hint"]))
     return "\n".join(lines)
+
+
+def caption_limit(nic: dict | None) -> int:
+    """Подписи на кадрах: у нейрофото — короткие (24), у эксперта — тезис с цифрой (до 48)."""
+    return int((nic or {}).get("caption_limit") or LIMITS["caption"])
 
 
 def validate(raw: dict, choice: Choice, pb: dict, n: int, generate_scenes: bool, nic: dict | None = None) -> Plan:
     if not isinstance(raw, dict):
         raise AIError("ответ не объект")
-    hook = _clip(raw.get("hook") or pb["hooks"][choice.hook_id]["pattern"], LIMITS["hook"])
-    captions = [_clip(c, LIMITS["caption"]) for c in (raw.get("captions") or [])][:n]
-    scenes: list[dict] = []
     nic = nic or niche.load("neurophoto")
+    cap = caption_limit(nic)
+    hook = _clip(raw.get("hook") or pb["hooks"][choice.hook_id]["pattern"], LIMITS["hook"])
+    captions = [_clip(c, cap) for c in (raw.get("captions") or [])][:n]
+    scenes: list[dict] = []
     if generate_scenes:
         for sc in (raw.get("scenes") or [])[:n]:
             if isinstance(sc, dict) and sc.get("where"):
-                scenes.append({k: _clip(sc.get(k, ""), 300) for k in ("title", "where", "wearing", "doing", "around", "light")})
+                scenes.append({k: _clip(sc.get(k, ""), 300) for k in ("title", "where", "wearing", "doing", "around", "light")}
+                              | ({"author": True} if sc.get("author") is True else {}))
         if len(scenes) < n:
             raise AIError(f"сцен {len(scenes)} из {n}")
-        captions = [_clip(sc["title"], LIMITS["caption"]) or c for sc, c in
+        captions = [_clip(sc["title"], cap) or c for sc, c in
                     zip(scenes, captions + [""] * (n - len(captions)))]
     captions += [""] * (n - len(captions))
     tags = [t if t.startswith("#") else f"#{t}" for t in (raw.get("hashtags") or []) if isinstance(t, str)]

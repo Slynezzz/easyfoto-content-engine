@@ -409,3 +409,51 @@ class SafetyAndTopicsTests(unittest.TestCase):
         self.assertIn("MAX открыл ботов", json.dumps(last[2], ensure_ascii=False))
         bot.on_command("/create", [])           # темы уже есть — второй поиск не нужен
         self.assertEqual(calls, [1])
+
+
+class ExpertReelTests(BrainTests):
+    def test_reel_context_and_polish(self):
+        from engine.planner import Plan
+        ai = FakeAI()
+        ctx = brain.reel_context(self.cfg, self.db, ai, self.req("tg"))
+        self.assertIn("MAX — 50 млн пользователей", ctx["facts_block"])
+        self.assertEqual(ctx["stage"], "reach")
+        self.assertFalse(ctx["author_ok"])
+        req = {**self.req("tg"), **ctx}
+        plan = Plan(choice={}, script={"hook": "Хук", "captions": ["кадр 1", "кадр 2"], "cta_title": "Жми",
+                                       "cta_sub": "сюда"}, post_caption="Текст поста " * 10)
+
+        def critic(system, prompt, images=None, temperature=0.9, model=None):
+            self.assertIn("MAX — 50 млн пользователей", prompt)
+            return {"hook": "«Бот в MAX» — зачем", "captions": ["MAX: 50 млн пользователей по данным VK",
+                                                                "Начните с одного процесса"],
+                    "cta_title": "Забери *чек-лист*", "cta_sub": "Бесплатно в боте",
+                    "post_caption": "По данным VK, в MAX 50 млн пользователей. " * 3}
+        ai.json = critic
+        out = brain.polish_reel(self.cfg, ai, plan, req)
+        self.assertEqual(out.script["hook"], "Бот в MAX, зачем")
+        self.assertEqual(out.script["captions"][0], "MAX: 50 млн пользователей по данным VK")   # до 48 символов
+        self.assertIn("Источники:\n— VK: https://vk.com/press", out.post_caption)
+
+    def test_polish_keeps_frames_when_counts_differ(self):
+        from engine.planner import Plan
+        ai = FakeAI()
+        ai.json = lambda *a, **k: {"captions": ["одна"], "post_caption": "коротко"}
+        plan = Plan(choice={}, script={"hook": "Х", "captions": ["a", "b"], "cta_title": "c", "cta_sub": "d"},
+                    post_caption="исходный текст")
+        out = brain.polish_reel(self.cfg, ai, plan, {**self.req("ig"), "facts_block": "ФАКТЫ"})
+        self.assertEqual(out.script["captions"], ["a", "b"])
+        self.assertEqual(out.post_caption, "исходный текст")
+
+    def test_author_scene_uses_refs_in_illustration_mode(self):
+        from engine import images
+        ref = self.cfg.data_dir / "me.jpg"
+        Image.new("RGB", (800, 1000), (200, 150, 120)).save(ref)
+        self.db.add_asset(str(ref), "ref")
+        ai = FakeAI()
+        images.generate(self.cfg, self.db, ai, {"title": "Автор у моря", "where": "набережная", "doing": "пишет",
+                                                "author": True}, "t")
+        self.assertTrue(ai.image_prompts[-1][1])                        # ушли фото-образцы
+        self.assertIn("бери только", ai.image_prompts[-1][0])
+        images.generate(self.cfg, self.db, ai, {"title": "Схема", "where": "стол", "doing": "схема"}, "t")
+        self.assertEqual(ai.image_prompts[-1][1], [])                   # обычный кадр — без лица
