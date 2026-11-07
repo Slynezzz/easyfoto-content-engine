@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 HOST = "https://graph.instagram.com"
 METRICS = ["views", "reach", "likes", "comments", "saved", "shares",
            "ig_reels_avg_watch_time", "ig_reels_video_view_total_time", "reels_skip_rate"]
+IMAGE_METRICS = ["views", "reach", "likes", "comments", "saved", "shares"]  # у постов с картинкой нет досмотров
 
 
 class IGError(RuntimeError):
@@ -163,14 +164,21 @@ class Instagram:
     def _create_and_publish(self, post_id: int, post, max_wait_s: int, poll_s: int) -> str:
         container = post["ig_container_id"]
         if not container:
-            container = self._req(
-                "POST", f"{self.account_id}/media",
-                media_type="REELS",
-                video_url=self.media_url(post["media_token"], "mp4"),
-                cover_url=self.media_url(post["media_token"], "jpg"),
-                caption=post["caption"] or "",
-                share_to_feed="true",
-            ).get("id")
+            if post["format"] == "post":  # пост с картинкой 4:5
+                container = self._req(
+                    "POST", f"{self.account_id}/media",
+                    image_url=self.media_url(post["media_token"], "jpg"),
+                    caption=post["caption"] or "",
+                ).get("id")
+            else:
+                container = self._req(
+                    "POST", f"{self.account_id}/media",
+                    media_type="REELS",
+                    video_url=self.media_url(post["media_token"], "mp4"),
+                    cover_url=self.media_url(post["media_token"], "jpg"),
+                    caption=post["caption"] or "",
+                    share_to_feed="true",
+                ).get("id")
             if not container:
                 raise IGError("Instagram не вернул id контейнера")
             self.db.update_post(post_id, ig_container_id=container)
@@ -181,7 +189,7 @@ class Instagram:
             if status == "FINISHED":
                 break
             if status in ("ERROR", "EXPIRED"):
-                raise IGError(f"Instagram не принял видео: {status}")
+                raise IGError(f"Instagram не принял {'картинку' if post['format'] == 'post' else 'видео'}: {status}")
             if status == "PUBLISHED":
                 media_id = self._find_published(post["caption"] or "")
                 if not media_id:
@@ -210,10 +218,10 @@ class Instagram:
         return None
 
     # ----------------------------------------------------------- insights
-    def insights(self, media_id: str) -> dict[str, int | float | None]:
-        """Метрики ролика. Если какая-то метрика не поддерживается, запрашивает по одной."""
+    def insights(self, media_id: str, image: bool = False) -> dict[str, int | float | None]:
+        """Метрики ролика или поста с картинкой. Если какая-то метрика не поддерживается, запрашивает по одной."""
         bad = self._bad_metrics()
-        metrics = [m for m in METRICS if m not in bad]
+        metrics = [m for m in (IMAGE_METRICS if image else METRICS) if m not in bad]
         try:
             data = self._req("GET", f"{media_id}/insights", metric=",".join(metrics)).get("data", [])
         except IGError:
@@ -228,7 +236,7 @@ class Instagram:
                 # Не пришла ни одна метрика — проблема в самом ролике (удалён) или в доступе,
                 # а не в метриках. Ничего не запоминаем.
                 raise IGError(f"нет статистики по ролику {media_id}")
-            if failed:
+            if failed and not image:  # отказы по картинкам не переносим на ролики
                 self.db.set("ig_bad_metrics", ",".join(sorted(bad | set(failed))))
                 self.db.set("ig_bad_metrics_at", now_iso())
         raw = {d["name"]: (d.get("values") or [{}])[0].get("value") for d in data}
@@ -250,12 +258,12 @@ class Instagram:
     def collect_all(self, max_age_days: int = 30) -> int:
         """Снимает метрики со всех опубликованных за max_age_days роликов."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat(timespec="seconds")
-        rows = self.db.q("SELECT id, ig_media_id FROM posts WHERE status='published' "
+        rows = self.db.q("SELECT id, ig_media_id, format FROM posts WHERE status='published' "
                          "AND ig_media_id IS NOT NULL AND published_at >= ?", (cutoff,))
         n = 0
         for r in rows:
             try:
-                self.db.add_metrics(r["id"], self.insights(r["ig_media_id"]))
+                self.db.add_metrics(r["id"], self.insights(r["ig_media_id"], image=r["format"] == "post"))
                 n += 1
             except IGError as e:
                 log.warning("insights #%s: %s", r["id"], e)

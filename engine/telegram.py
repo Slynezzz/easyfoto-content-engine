@@ -82,7 +82,8 @@ class TelegramAPI:
     def send_document(self, chat_id: int, path: str | Path, caption: str = "",
                       reply_markup: dict | None = None) -> dict:
         """Файл без пережатия — для загрузки в другие соцсети в исходном качестве."""
-        mime = {".pdf": "application/pdf", ".mp4": "video/mp4", ".docx":
+        mime = {".pdf": "application/pdf", ".mp4": "video/mp4", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".png": "image/png", ".docx":
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}.get(
             Path(path).suffix.lower(), "application/octet-stream")
         files = {"document": (Path(path).name, Path(path).read_bytes(), mime)}

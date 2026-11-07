@@ -61,12 +61,16 @@ class TGChannel:
         row = self.db.crosspost(post_id, "tg")
         if row and row["external_id"]:  # видео уже в канале — не дублируем
             return row["url"] or self._url(int(row["external_id"]))
-        video = Path(post["video_path"] or "")
-        if not post["video_path"] or not video.exists():
-            raise TGChannelError("файл ролика уже удалён с тома")
+        is_post = post["format"] == "post"
+        media = Path((post["cover_path"] if is_post else post["video_path"]) or "")
+        if not media.name or not media.exists():
+            raise TGChannelError("файл " + ("картинки" if is_post else "ролика") + " уже удалён с тома")
         head, rest = self._split(self.text_for(post))
         try:
-            msg = self.api.send_video(self.cfg.tg_channel_id, video, head, cover=post["cover_path"])
+            if is_post:
+                msg = self.api.send_photo(self.cfg.tg_channel_id, media, head)
+            else:
+                msg = self.api.send_video(self.cfg.tg_channel_id, media, head, cover=post["cover_path"])
         except TelegramError as e:
             hint = (" — добавь админ-бота администратором канала с правом публикации и проверь TG_CHANNEL_ID"
                     if any(w in str(e).lower() for w in ("not enough rights", "chat not found", "forbidden",

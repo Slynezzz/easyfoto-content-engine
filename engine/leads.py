@@ -176,7 +176,8 @@ class LeadBot:
             self.api.call("setMyCommands", commands=[
                 {"command": "start", "description": "Чек-лист и бесплатный разбор"},
                 {"command": "delete", "description": "Удалить мои данные"}])
-            if not (self.api.call("getMyDescription") or {}).get("description"):
+            current = (self.api.call("getMyDescription") or {}).get("description") or ""
+            if not current or "Здесь можно забрать бесплатный чек-лист" in current:  # пустое или наше прежнее
                 self.api.call("setMyDescription", description=(
                     f"{self.p['author']} — {self.p['about']}.\n\nЗдесь можно забрать бесплатный чек-лист и "
                     "оставить заявку на бесплатный разбор вашей задачи.")[:512])
@@ -250,7 +251,7 @@ class LeadBot:
 
     # ---- клиент
     def welcome(self, chat_id: int) -> None:
-        text = (f"Здравствуйте! Я бот {self.p['author_gen']} — {self.p['about']}.\n\n"
+        text = (f"Здравствуйте! Я бот {self.p['author_gen']}. {self.p['first']} — {self.p['about']}.\n\n"
                 f"Здесь можно:\n📋 забрать чек-лист «{self.p['magnet']}» — за 3 минуты станет понятно, "
                 "что в вашем бизнесе можно отдать боту;\n"
                 f"🧩 оставить заявку на бесплатный разбор — {self.p['first']} лично посмотрит вашу задачу "

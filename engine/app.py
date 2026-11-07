@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import analyst, balances, funnel, images, leads, niche, occasions, playbook as pbm, scout, server
+from . import analyst, balances, brain, funnel, images, leads, niche, occasions, playbook as pbm, scout, server
 from .admin_bot import AdminBot, Services, retry_keyboard
 from .config import Config
 from .db import DB
@@ -95,14 +95,19 @@ class Engine:
         return produce(self.cfg, self.db, self.ai, pb, self.now().date(), self.rng, scheduled_for,
                        occasion=occasion, request=request)
 
-    def make_request(self, topic_id: int, platform: str) -> int:
-        """Ролик по выбранной теме для выбранной площадки."""
+    def make_request(self, topic_id: int, platform: str, kind: str = "reel") -> int:
+        """Ролик или пост с картинкой (kind="post") по выбранной теме для выбранной площадки."""
         t = self.db.topic(topic_id)
         if not t:
             raise ValueError("тема не найдена — откройте /create заново")
         req = {"title": t["title"], "angle": t["angle"] or "", "url": t["url"] or "",
                "platform": platform, "topic_id": t["id"]}
-        post_id = self.make_one(request=req)
+        if kind == "post":
+            if self.gen_paused():
+                raise RuntimeError("генерация остановлена — включить: /run или кнопка в /status")
+            post_id = brain.make_post(self.cfg, self.db, self.ai, req)
+        else:
+            post_id = self.make_one(request=req)
         self.db.x("UPDATE topics SET used_at=? WHERE id=?",
                   (self.now().astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds"), t["id"]))
         return post_id
@@ -189,6 +194,10 @@ class Engine:
             platforms.append("yt")
         if self.tg.ready():
             platforms.append("tg")
+        if post["format"] == "post":  # пост с картинкой: в YouTube нельзя, во VK — вручную (стена)
+            platforms = [("vk_manual" if p == "vk" else p) for p in platforms if p != "yt"]
+            if "vk_manual" not in platforms and (self.vk.can_autopublish() or self.cfg.vk_manual):
+                platforms.append("vk_manual")
         if target:  # ролик сделан под одну площадку — только туда
             want = {"vk": ("vk", "vk_manual"), "yt": ("yt",), "tg": ("tg",)}.get(target, ())
             platforms = [p for p in platforms if p in want]
