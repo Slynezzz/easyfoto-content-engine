@@ -457,3 +457,41 @@ class ExpertReelTests(BrainTests):
         self.assertIn("бери только", ai.image_prompts[-1][0])
         images.generate(self.cfg, self.db, ai, {"title": "Схема", "where": "стол", "doing": "схема"}, "t")
         self.assertEqual(ai.image_prompts[-1][1], [])                   # обычный кадр — без лица
+
+
+class AllPlatformsTests(BrainTests):
+    def test_adapt_reuses_images_and_rewrites_text(self):
+        ai = FakeAI()
+        first = brain.make_post(self.cfg, self.db, ai, self.req("tg"), kind="carousel")
+        n_images = len(ai.image_prompts)
+        ai.json = lambda system, prompt, **k: {"body": "Текст для Instagram без ссылок. " * 5,
+                                                "hashtags": ["#a", "#b", "#c", "#d", "#e", "#f"]}
+        ig = brain.adapt_post(self.cfg, self.db, ai, first, "ig")
+        self.assertEqual(len(ai.image_prompts), n_images)                 # картинку заново не генерировали
+        src, post = self.db.post(first), self.db.post(ig)
+        self.assertEqual((post["target"], post["format"]), ("ig", "carousel"))
+        self.assertNotEqual(post["media_token"], src["media_token"])
+        slides = json.loads(post["script_json"])["slides"]
+        self.assertTrue(slides and all(Path(x).exists() and post["media_token"] in x for x in slides))
+        self.assertNotIn("http", post["caption"])                         # в Instagram без ссылок
+        self.assertEqual(post["caption"].count("#"), 5)
+
+    def test_admin_all_platforms_flow(self):
+        from engine.admin_bot import AdminBot, Services
+        tid = self.db.add_topic("news", "Тема", "", "")
+        calls = []
+
+        def make_request(topic_id, platform, kind="reel"):
+            calls.append((platform, kind))
+            return []
+        api = mock.Mock()
+        api.send_message.return_value = {"message_id": 1}
+        bot = AdminBot(self.cfg, self.db, api, Services(make_one=lambda: 0, instagram_ready=lambda: False,
+                                                        run_analysis=lambda: "", stats_text=lambda: "",
+                                                        make_request=make_request))
+        bot.run_bg = lambda fn: fn()
+        kb = bot.platform_keyboard(tid)
+        self.assertEqual(kb["inline_keyboard"][-1][0]["callback_data"], f"cp:{tid}:all")
+        bot.on_callback({"id": "c", "data": f"cp:{tid}:all", "message": {"message_id": 9}})
+        bot.on_callback({"id": "c", "data": f"ck:{tid}:all:post", "message": {"message_id": 9}})
+        self.assertEqual(calls, [("all", "post")])

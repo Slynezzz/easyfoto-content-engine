@@ -453,7 +453,8 @@ def make_post(cfg: Config, db: DB, ai: AI, request: dict, kind: str = "post") ->
     script = {"script": {"hook": post["headline"]}, "post_caption": caption, "llm_ok": True, "slides": slides,
               "brain": {k: post[k] for k in ("stage", "segment", "insight", "objection", "hooks", "critic", "mechanic",
                                       "research", "sources", "slides", "dialog")}
-              | {"image_mode": post["image"]["mode"], "image_provider": provider, "subline": post["subline"]}}
+              | {"image_mode": post["image"]["mode"], "image_provider": provider, "subline": post["subline"],
+                 "body": post["body"]}}
     return db.create_post(
         target=request.get("platform"), topic_id=request.get("topic_id"),
         status="rendered", format=kind, hook_id=f"post_{post['mechanic']}",
@@ -534,3 +535,51 @@ def polish_reel(cfg: Config, ai: AI, plan, request: dict):
         plan.post_caption += "\n\nИсточники:\n" + "\n".join(f"— {s['source']}: {s['url']}" for s in sources)
     plan.script = sc
     return plan
+
+
+# ------------------------------------------------------------------ одна идея — все площадки
+ADAPT_SYSTEM = """Ты — редактор соцсетей в команде маркетинга эксперта. Перепиши готовый пост под другую
+площадку: сохрани смысл, факты (цифры только из исходного текста и списка фактов), структуру и силу текста,
+но выполни правила площадки — длину, тон, призыв, хэштеги. Не добавляй ничего, чего нет в исходнике и фактах.
+Отвечай ТОЛЬКО JSON: {"body": "текст поста", "hashtags": ["#..."]}"""
+
+
+def adapt_post(cfg: Config, db: DB, ai: AI, src_id: int, platform: str) -> int:
+    """Тот же пост (картинка, карусель или переписка) для другой площадки: картинки копируются,
+    текст переписывается по её правилам. Генерация картинок не тратится."""
+    import shutil
+    src = db.post(src_id)
+    plan = json.loads(src["script_json"] or "{}")
+    b = plan.get("brain") or {}
+    pl = platforms.get(platform)
+    strat = strategy()
+    length = strat.get("length", {}).get(platform, "1200–2000 символов")
+    facts = research.facts_block({"facts": (b.get("research") or {}).get("facts") or []})
+    prompt = "\n".join([f"ПЛОЩАДКА: {pl['rules']}", f"Объём: {length}. Хэштегов: до {pl['hashtags']}.", facts, "",
+                         "ИСХОДНЫЙ ПОСТ:", b.get("body") or src["caption"] or ""])
+    try:
+        res = _ask(ai, cfg, ADAPT_SYSTEM + "\n\nБРИФ:\n" + (brief.load(cfg) or ""), prompt)
+    except AIError as e:
+        raise BrainError(f"не удалось переписать текст для {platforms.label(platform)}: {e}") from None
+    body = _clip(str(res.get("body") or ""), pl["caption_limit"] - 200)
+    if len(body) < 80:
+        raise BrainError(f"пустой текст для {platforms.label(platform)}")
+    tags = [t if str(t).startswith("#") else f"#{t}" for t in (res.get("hashtags") or []) if t][: pl["hashtags"]]
+    caption = compose_caption({"body": body, "hashtags": tags, "sources": b.get("sources") or []}, platform)
+
+    token = secrets.token_urlsafe(18)
+    cover = cfg.media_dir / f"{token}.jpg"
+    shutil.copyfile(src["cover_path"], cover)
+    slides = []
+    for i, path in enumerate(plan.get("slides") or [], start=2):
+        dst = cfg.media_dir / f"{token}_{i}.jpg"
+        shutil.copyfile(path, dst)
+        slides.append(str(dst))
+    plan.update({"slides": slides, "post_caption": caption})
+    plan["brain"] = {**b, "body": body, "adapted_from": src_id}
+    return db.create_post(
+        target=platform, topic_id=src["topic_id"], status="rendered", format=src["format"],
+        hook_id=src["hook_id"], theme=src["theme"], audience=src["audience"], explore=0,
+        script_json=json.dumps(plan, ensure_ascii=False), asset_ids_json=[], video_path=None,
+        cover_path=str(cover), caption=caption, media_token=token,
+    )

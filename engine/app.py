@@ -96,8 +96,9 @@ class Engine:
         return produce(self.cfg, self.db, self.ai, pb, self.now().date(), self.rng, scheduled_for,
                        occasion=occasion, request=request)
 
-    def make_request(self, topic_id: int, platform: str, kind: str = "reel") -> int:
-        """Ролик или пост с картинкой (kind="post") по выбранной теме для выбранной площадки."""
+    def make_request(self, topic_id: int, platform: str, kind: str = "reel") -> int | list[int]:
+        """Ролик, пост, карусель или переписка по теме для площадки; platform="all" — для всех сразу
+        (у постов — список: Telegram, VK, Instagram с одной картинкой и своим текстом)."""
         t = self.db.topic(topic_id)
         if not t:
             raise ValueError("тема не найдена — откройте /create заново")
@@ -106,8 +107,19 @@ class Engine:
         if kind in ("post", "carousel", "dialog"):
             if self.gen_paused():
                 raise RuntimeError("генерация остановлена — включить: /run или кнопка в /status")
-            post_id = brain.make_post(self.cfg, self.db, self.ai, req, kind)
+            if platform == "all":  # одна картинка — тексты под Telegram, VK и Instagram
+                first = brain.make_post(self.cfg, self.db, self.ai, {**req, "platform": "tg"}, kind)
+                post_id = [first]
+                for pid in ("vk", "ig"):
+                    try:
+                        post_id.append(brain.adapt_post(self.cfg, self.db, self.ai, first, pid))
+                    except brain.BrainError as e:
+                        self.say(f"⚠️ {e}")
+            else:
+                post_id = brain.make_post(self.cfg, self.db, self.ai, req, kind)
         else:
+            if platform == "all":  # ролик без площадки — уходит на все подключённые
+                req["platform"] = None
             if niche.load(self.cfg.niche).get("posts"):  # эксперт: факты, этап воронки, автор в кадре
                 req.update(brain.reel_context(self.cfg, self.db, self.ai, req))
             post_id = self.make_one(request=req)

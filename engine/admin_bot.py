@@ -907,6 +907,7 @@ class AdminBot:
     def platform_keyboard(self, topic_id: int | None) -> dict:
         rows = [[{"text": f"{p['emoji']} {p['title']}", "callback_data": f"cp:{topic_id}:{pid}"}]
                 for pid, p in platforms.PLATFORMS.items()]
+        rows.append([{"text": "📣 Все площадки сразу", "callback_data": f"cp:{topic_id}:all"}])
         return {"inline_keyboard": rows}
 
     def on_create_callback(self, cq: dict, data: str) -> None:
@@ -939,7 +940,7 @@ class AdminBot:
             _, raw, pid, kind = data.split(":", 3)
         else:
             _, raw, pid = data.split(":", 2)
-        if not raw.isdigit() or pid not in platforms.PLATFORMS:
+        if not raw.isdigit() or (pid not in platforms.PLATFORMS and pid != "all"):
             return
         if data.startswith("cp:") and niche.load(self.cfg.niche).get("posts") and pid != "yt":
             self.say(f"Что сделать для {platforms.label(pid)}?", {"inline_keyboard": [
@@ -955,10 +956,13 @@ class AdminBot:
             self.say("Создание по запросу недоступно.")
             return
         if kind in ("post", "carousel", "dialog"):
-            self.say(f"Пишу {KIND_RU[kind]} для {platforms.label(pid)}: поиск фактов, "
-                     "стратегия, 5 хуков, текст, проверка критиком и картинка — около 3–4 минут…")
+            where = ("Telegram, VK и Instagram (картинка одна, текст под каждую площадку)" if pid == "all"
+                     else platforms.label(pid))
+            self.say(f"Пишу {KIND_RU[kind]} для {where}: поиск фактов, "
+                     "стратегия, 5 хуков, текст, проверка критиком и картинка — около 3–5 минут…")
         else:
-            self.say(f"Собираю ролик для {platforms.label(pid)}: сценарий, новые кадры и музыка — это 3–6 минут…")
+            where = "всех площадок" if pid == "all" else platforms.label(pid)
+            self.say(f"Собираю ролик для {where}: сценарий, новые кадры и музыка — это 3–6 минут…")
 
         def job():
             try:
@@ -967,8 +971,9 @@ class AdminBot:
             except Exception as e:  # noqa: BLE001
                 self.say(f"⚠️ Не получилось: {e}")
                 return
-            if not self.send_for_approval(post_id):
-                self.say(f"Ролик #{post_id} собран, отправлю его чуть позже.")
+            for pid_ in (post_id if isinstance(post_id, list) else [post_id]):
+                if not self.send_for_approval(pid_):
+                    self.say(f"#{pid_} собран, отправлю его чуть позже.")
         self.run_bg(job)
 
     def magnet_text(self) -> str:
