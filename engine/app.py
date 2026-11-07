@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import analyst, balances, funnel, images, niche, occasions, playbook as pbm, scout, server
+from . import analyst, balances, funnel, images, leads, niche, occasions, playbook as pbm, scout, server
 from .admin_bot import AdminBot, Services, retry_keyboard
 from .config import Config
 from .db import DB
@@ -43,6 +43,7 @@ class Engine:
         self.vk = VK(cfg, db)
         self.yt = YouTube(cfg, db)
         self.tg = TGChannel(cfg, db, None)   # api подставляется, когда создан админ-бот
+        self.leadbot = None                   # бот для заявок эксперта (LEAD_BOT_TOKEN)
         self.tz = ZoneInfo(cfg.timezone)
         self._now = now or (lambda: datetime.now(self.tz))
         self.rng = rng or random.Random()
@@ -523,6 +524,10 @@ class Engine:
             self.say("⚠️ Не удалось продлить токен Instagram. Если не исправить, через ~60 дней публикация остановится.")
         return ok
 
+    def job_leads(self) -> int:
+        """Напоминания бота для заявок: брошенная анкета, чек-лист без разбора, заявка без ответа."""
+        return self.leadbot.job() if self.leadbot else 0
+
     def tick(self) -> None:
         jobs = [
             ("tag", timedelta(minutes=5), self.job_tag),
@@ -538,6 +543,7 @@ class Engine:
             ("analysis", timedelta(hours=1), self.job_analysis),
             ("token", timedelta(days=7) if self.db.get("ig_token_seen_at") else timedelta(days=2), self.job_token),
             ("cleanup", timedelta(hours=12), self.job_cleanup),
+            ("leads", timedelta(minutes=10), self.job_leads),
         ]
         for name, period, fn in jobs:
             if not self._every(name, period):
@@ -594,10 +600,14 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
             tg_status=lambda: (f"Telegram-канал: {cfg.tg_channel_id}" if cfg.tg_channel_id
                                else "Telegram-канал: не подключён (TG_CHANNEL_ID)"),
             balances_text=lambda: balances.report(cfg, db, ai),
+            leads_text=(lambda: leads.stats_text(db)) if cfg.lead_bot_token else None,
         ))
         engine.bot = bot
         engine.tg.api = bot.api
         bot.set_menu()
+    if cfg.lead_bot_token:
+        engine.leadbot = leads.LeadBot(cfg, db, TelegramAPI(cfg.lead_bot_token), fallback_say=engine.say)
+        engine.leadbot.setup()
     ai.attach(db, engine.say)   # помнить исчерпанные ключи и сообщать о переключении
     engine.recover()
     return engine, bot
@@ -610,6 +620,7 @@ def main() -> None:
     engine, bot = build(cfg)
     server.start(cfg.media_dir, cfg.port, routes={"/vk/callback": engine.vk_callback,
                                                   "/yt/callback": engine.yt_callback,
+                                                  "/leads-privacy": lambda _: leads.privacy_page(cfg),
                                                   **server.legal_pages(cfg.bot_username)})
     log.info("старт: слоты %s, источник фото %s, Instagram %s", cfg.publish_hours_list[: cfg.reels_per_day],
              cfg.image_source, "подключён" if engine.ig.ready() else "не подключён")
@@ -632,6 +643,18 @@ def main() -> None:
 
     if bot:
         threading.Thread(target=poll_loop, name="bot", daemon=True).start()
+
+    def lead_loop():
+        while True:
+            try:
+                engine.leadbot.poll_once()
+            except Exception as e:  # noqa: BLE001
+                log.warning("lead poll: %s", e)
+                time.sleep(5)
+
+    if engine.leadbot:
+        threading.Thread(target=lead_loop, name="leadbot", daemon=True).start()
+        log.info("бот для заявок @%s запущен", cfg.bot_username.lstrip("@"))
     while True:
         engine.tick()
         time.sleep(30)

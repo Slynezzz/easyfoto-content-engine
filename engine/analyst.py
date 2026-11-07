@@ -132,15 +132,22 @@ def eligible_rows(db: DB) -> list[dict]:
 
 
 def conversions(cfg: Config, db: DB) -> tuple[dict[int, dict], str]:
-    """Переходы в бот по роликам из базы бота; без базы — пусто."""
-    if not cfg.bot_database_url:
-        return {}, ""
+    """Переходы в бот по роликам: из бота для заявок (эксперт) или из базы бота продукта; иначе пусто."""
     from . import attribution, funnel
-    try:
-        users = funnel.users(cfg, USER_WINDOW_DAYS)
-    except funnel.FunnelError as e:
-        log.warning("conversions: %s", e)
-        return {}, f"Переходы в бот не учтены: {e}".split("\n")[0]
+    labels = None
+    if cfg.lead_bot_token:
+        from . import leads
+        since = (datetime.now(timezone.utc) - timedelta(days=USER_WINDOW_DAYS)).isoformat(timespec="seconds")
+        users = [u for u in leads.users_for_attribution(db) if (u["registered_at"] or "") >= since]
+        labels = ("пришли в бот заявок", "взяли чек-лист", "оставили заявку")
+    elif not cfg.bot_database_url:
+        return {}, ""
+    else:
+        try:
+            users = funnel.users(cfg, USER_WINDOW_DAYS)
+        except funnel.FunnelError as e:
+            log.warning("conversions: %s", e)
+            return {}, f"Переходы в бот не учтены: {e}".split("\n")[0]
     pubs = attribution.publications(db)
     conv = attribution.attribute(users, pubs)
     # ролики, вышедшие внутри окна выборки, без переходов — честный ноль (а более старые не трогаем)
@@ -149,7 +156,7 @@ def conversions(cfg: Config, db: DB) -> tuple[dict[int, dict], str]:
         for pid, t in items:
             if t >= since:
                 conv.setdefault(pid, {"regs": 0.0, "photo": 0.0, "bought": 0.0, "points": 0.0})
-    return conv, attribution.summary({k: v for k, v in conv.items() if v["regs"]})
+    return conv, attribution.summary({k: v for k, v in conv.items() if v["regs"]}, labels)
 
 
 def _table(scored: list[dict], pb: dict) -> str:

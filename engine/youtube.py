@@ -23,7 +23,7 @@ from urllib.parse import urlencode
 
 import requests
 
-from . import funnel
+from . import funnel, niche
 from .config import Config
 from .db import DB
 
@@ -186,10 +186,12 @@ class YouTube:
     def text_for(self, post) -> tuple[str, str]:
         plan = json.loads(post["script_json"] or "{}")
         hook = str(plan.get("script", {}).get("hook") or "").replace("*", "").strip()
-        title = (hook or "Нейрофото из обычных селфи")[:90].rstrip() + " #shorts"
-        link = self.cfg.cta_url or funnel.link(self.cfg, "yt", "short", f"p{post['id']}")
+        nic = niche.load(self.cfg.niche)
+        title = (hook or nic["fallback_title"])[:90].rstrip() + " #shorts"
+        link = funnel.cta_link(self.cfg, "yt", "short", f"p{post['id']}")
         caption = (post["caption"] or "").strip()
-        desc = f"{caption}\n\n👉 {'Связаться' if self.cfg.cta_url else 'Бот'} — ссылка в шапке канала. Или: {link}"
+        label = "Связаться" if self.cfg.cta_url and not self.cfg.lead_bot_token else nic["cta_label"]
+        desc = f"{caption}\n\n👉 {label} — ссылка в шапке канала. Или: {link}"
         return title[:100], desc[:4900]
 
     def publish(self, post_id: int) -> str:

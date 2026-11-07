@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from . import funnel
+from . import funnel, niche
 from .config import Config
 from .db import DB
 from .telegram import TelegramAPI, TelegramError
@@ -34,8 +34,9 @@ class TGChannel:
 
     def text_for(self, post) -> str:
         caption = (post["caption"] or "").strip()
-        link = self.cfg.cta_url or funnel.link(self.cfg, "tg", "post", f"p{post['id']}")
-        return f"{caption}\n\n👉 {link}"
+        link = funnel.cta_link(self.cfg, "tg", "post", f"p{post['id']}")
+        label = niche.load(self.cfg.niche)["cta_label"] if self.cfg.lead_bot_token else ""
+        return f"{caption}\n\n👉 {label + ': ' if label else ''}{link}"
 
     def _split(self, text: str) -> tuple[str, str]:
         if len(text) <= CAPTION_LIMIT:

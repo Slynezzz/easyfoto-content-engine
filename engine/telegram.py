@@ -51,9 +51,18 @@ class TelegramAPI:
         return self.call("getUpdates", http_timeout=timeout + 10, offset=offset, timeout=timeout,
                          allowed_updates=["message", "callback_query"])
 
-    def send_message(self, chat_id: int, text: str, reply_markup: dict | None = None) -> dict:
+    def send_message(self, chat_id: int, text: str, reply_markup: dict | None = None,
+                     reply_to: int | None = None) -> dict:
         return self.call("sendMessage", chat_id=chat_id, text=text[:4096],
-                         reply_markup=reply_markup, disable_web_page_preview="true")
+                         reply_markup=reply_markup, disable_web_page_preview="true",
+                         reply_parameters={"message_id": reply_to, "allow_sending_without_reply": True}
+                         if reply_to else None)
+
+    def copy_message(self, chat_id: int, from_chat_id: int, message_id: int,
+                     reply_markup: dict | None = None) -> dict:
+        """Копия сообщения (текст, голосовое, фото, файл) без подписи «переслано от»."""
+        return self.call("copyMessage", chat_id=chat_id, from_chat_id=from_chat_id, message_id=message_id,
+                         reply_markup=reply_markup)
 
     def send_video(self, chat_id: int, path: str | Path, caption: str = "",
                    reply_markup: dict | None = None, cover: str | Path | None = None) -> dict:
@@ -73,7 +82,10 @@ class TelegramAPI:
     def send_document(self, chat_id: int, path: str | Path, caption: str = "",
                       reply_markup: dict | None = None) -> dict:
         """Файл без пережатия — для загрузки в другие соцсети в исходном качестве."""
-        files = {"document": (Path(path).name, Path(path).read_bytes(), "video/mp4")}
+        mime = {".pdf": "application/pdf", ".mp4": "video/mp4", ".docx":
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}.get(
+            Path(path).suffix.lower(), "application/octet-stream")
+        files = {"document": (Path(path).name, Path(path).read_bytes(), mime)}
         return self.call("sendDocument", http_timeout=180, files=files, chat_id=chat_id,
                          caption=caption[:1024], reply_markup=reply_markup)
 

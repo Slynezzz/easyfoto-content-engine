@@ -47,6 +47,9 @@ class Config:
     niche: str = field(default_factory=lambda: _env("NICHE", "neurophoto"))
     # Куда вести людей из роликов, если это не бот с метками (например, Telegram автора или сайт)
     cta_url: str = field(default_factory=lambda: _env("CTA_URL"))
+    # Бот для заявок (эксперт): чек-лист, анкета бесплатного разбора, карточки заявок владельцу.
+    # Его @имя — в BOT_USERNAME: ссылки из роликов ведут в него с меткой ролика.
+    lead_bot_token: str = field(default_factory=lambda: _env("LEAD_BOT_TOKEN"))
     # Telegram-канал, куда публиковать ролики (бот админки — администратор канала): @имя или -100…
     tg_channel_id: str = field(default_factory=lambda: _env("TG_CHANNEL_ID"))
     # Модель, которая пишет хуки и тексты роликов (сильнее — убедительнее). Пусто — та же, что для служебных задач.

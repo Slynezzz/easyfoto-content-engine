@@ -34,5 +34,7 @@
   "brief": "brief.md",
   "occasions": null,
   "image_mode": "likeness",
-  "scenes_hint": ""
+  "scenes_hint": "",
+  "cta_label": "Попробовать бесплатно",
+  "fallback_title": "Нейрофото из обычных селфи"
 }

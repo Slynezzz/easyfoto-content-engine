@@ -69,13 +69,14 @@ def attribute(users: list[dict], pubs: dict[str, list[tuple[int, datetime]]]) ->
     return out
 
 
-def summary(conv: dict[int, dict]) -> str:
+def summary(conv: dict[int, dict], labels: tuple[str, str, str] | None = None) -> str:
     if not conv:
         return ""
+    came, mid, won = labels or ("пришли", "сделали фото", "купили")
     regs = sum(a["regs"] for a in conv.values())
     photo = sum(a["photo"] for a in conv.values())
     bought = sum(a["bought"] for a in conv.values())
     top = sorted(conv.items(), key=lambda kv: -kv[1]["points"])[:3]
-    best = ", ".join(f"#{pid} ({a['regs']:.1f} пришли, {a['bought']:.1f} купили)" for pid, a in top)
-    return (f"Переходы в бот с роликов: {regs:.0f} пришли → {photo:.0f} сделали фото → {bought:.0f} купили. "
+    best = ", ".join(f"#{pid} ({a['regs']:.1f} {came}, {a['bought']:.1f} {won})" for pid, a in top)
+    return (f"Переходы в бот с роликов: {regs:.0f} {came} → {photo:.0f} {mid} → {bought:.0f} {won}. "
             f"Больше всех привели: {best}.")

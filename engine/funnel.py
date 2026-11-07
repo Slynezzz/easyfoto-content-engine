@@ -42,8 +42,32 @@ def link(cfg: Config, source: str, medium: str = "bio", campaign: str = "", targ
     return f"https://t.me/{cfg.bot_username.lstrip('@')}?start={param}"
 
 
+def cta_link(cfg: Config, source: str, medium: str = "bio", campaign: str = "", target: str = "tg") -> str:
+    """Ссылка призыва под постом. Есть бот для заявок — всегда он с меткой ролика (так видно,
+    какой ролик привёл заявку); иначе CTA_URL, если задан; иначе бот продукта с меткой."""
+    if cfg.lead_bot_token:
+        return link(cfg, source, medium, campaign)
+    return cfg.cta_url or link(cfg, source, medium, campaign, target=target)
+
+
+def parse_start(param: str) -> dict:
+    """utm_<source>_<medium>_<campaign> → {"source", "medium", "campaign", "post_id"}."""
+    parts = (param or "").split("_")
+    if len(parts) < 2 or parts[0] != "utm":
+        return {"source": None, "medium": None, "campaign": None, "post_id": None}
+    source = parts[1] or None
+    medium = parts[2] if len(parts) > 2 else None
+    campaign = "_".join(parts[3:]) or None
+    m = re.fullmatch(r"p(\d+)", campaign or "")
+    return {"source": source, "medium": medium, "campaign": campaign, "post_id": int(m.group(1)) if m else None}
+
+
 def links_text(cfg: Config) -> str:
     rows = [f"• {name}: {link(cfg, key)}" for key, name in SOURCES.items()]
+    if cfg.lead_bot_token:
+        return ("Ссылки на бот для заявок с меткой площадки — поставь каждую в шапку своего профиля. "
+                "Тогда /leads покажет, сколько людей пришло с каждой площадки, сколько взяли чек-лист и "
+                "оставили заявку на разбор.\n\n" + "\n".join(rows))
     return ("Ссылки на бот с меткой площадки — поставь каждую в шапку своего профиля. "
             "Тогда /funnel покажет, сколько людей пришло с каждой площадки, сколько сделали фото и купили.\n\n"
             "Telegram-бот:\n" + "\n".join(rows)

@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 
-from . import funnel
+from . import funnel, niche
 from .config import Config
 from .db import DB
 
@@ -276,11 +276,12 @@ class VK:
         import json
         plan = json.loads(post["script_json"] or "{}")
         hook = str(plan.get("script", {}).get("hook") or "").replace("*", "").strip()
-        link = self.cfg.cta_url or funnel.link(self.cfg, "vk", "clip", f"p{post['id']}",
-                                               target=self.cfg.vk_link_target)
+        link = funnel.cta_link(self.cfg, "vk", "clip", f"p{post['id']}", target=self.cfg.vk_link_target)
+        nic = niche.load(self.cfg.niche)
+        label = "Написать мне" if self.cfg.cta_url and not self.cfg.lead_bot_token else nic["cta_label"]
         caption = (post["caption"] or "").strip()
-        text = f"{caption}\n\n👉 {'Написать мне' if self.cfg.cta_url else 'Попробовать бесплатно'}: {link}"
-        return (hook or "Нейрофото из обычных селфи")[:120], text[:4000]
+        text = f"{caption}\n\n👉 {label}: {link}"
+        return (hook or nic["fallback_title"])[:120], text[:4000]
 
     def publish(self, post_id: int) -> str:
         """Публикует ролик. Возвращает ссылку. Повтор после частичного успеха не дублирует видео."""

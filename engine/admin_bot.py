@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import brief, funnel, images, music, musicgen
+from . import brief, funnel, images, music, musicgen, niche
 from . import platforms
 from . import playbook as pbm
 from .config import Config
@@ -42,6 +42,8 @@ HELP = """Команды:
 /balance — балансы и лимиты всех платных сервисов
 /funnel — сколько пришло в бот по ссылкам, сделали фото и купили (/funnel 7 — за неделю)
 /links — ссылки на бот с меткой для шапки каждой соцсети
+/leads — заявки из бота для заявок: откуда пришли, кто взял чек-лист, кто оставил заявку
+/magnet — какой чек-лист выдаёт бот заявок (заменить — прислать PDF с подписью «чеклист»)
 /analyze — пересчитать плейбук по статистике
 /create — создать ролик: выбрать тему (новость, тренд, инфоповод, проблему или свою) и площадку
 /status — состояние и кнопки: остановить/включить генерацию и публикации
@@ -97,6 +99,7 @@ class Services:
     auto_plan: Callable[[], bool] = lambda: False
     vk_retry: Callable[[int], str] | None = None
     balances_text: Callable[[], str] = lambda: "Проверка балансов недоступна"
+    leads_text: Callable[[], str] | None = None             # сводка бота для заявок (если подключён)
     vk_status: Callable[[], str] = lambda: "VK: не подключён"
     yt_status: Callable[[], str] = lambda: "YouTube: не подключён"
     ig_status: Callable[[], str] | None = None
@@ -330,6 +333,9 @@ class AdminBot:
             ext = Path(name).suffix or ".jpg"
             if ext in (".md", ".txt") and (msg.get("caption") or "").strip().lower().startswith("бриф"):
                 self.on_brief_file(doc)
+                return
+            if (msg.get("caption") or "").strip().lower().replace("-", "").startswith("чеклист"):
+                self.on_magnet_file(doc, (msg.get("caption") or "").strip())
                 return
             if ext not in images.IMAGE_EXT:
                 self.say("Это не фото. Принимаю jpg, png, webp.")
@@ -719,6 +725,14 @@ class AdminBot:
             self.run_bg(lambda: self.say(funnel.report(self.cfg, days)))
         elif cmd == "/links":
             self.say(funnel.links_text(self.cfg))
+        elif cmd == "/leads":
+            self.say(self.s.leads_text() if self.s.leads_text else
+                     "Бот для заявок не подключён: добавь в Railway LEAD_BOT_TOKEN и BOT_USERNAME.")
+        elif cmd == "/magnet":
+            if args and args[0].lower() == "reset":
+                self.db.set("lead_magnet_file", "")
+                self.db.set("lead_magnet_title", "")
+            self.say(self.magnet_text())
         elif cmd == "/photos":
             self.photos_menu()
         elif cmd == "/move":
@@ -882,6 +896,29 @@ class AdminBot:
                 self.say(f"Ролик #{post_id} собран, отправлю его чуть позже.")
         self.run_bg(job)
 
+    def magnet_text(self) -> str:
+        from . import leads
+        custom = self.db.get("lead_magnet_file")
+        title = self.db.get("lead_magnet_title") or niche.load(self.cfg.niche).get("lead_magnet_title", "")
+        where = f"твой файл {Path(custom).name}" if custom and Path(custom).is_file() else \
+            f"стандартный {leads.DEFAULT_MAGNET.name}"
+        return (f"Бот для заявок выдаёт: {where}\nНазвание: «{title}»\n\n"
+                "Заменить — пришли файл (PDF, DOCX) с подписью «чеклист Название материала». "
+                "Вернуть стандартный — /magnet reset.")
+
+    def on_magnet_file(self, doc: dict, caption: str) -> None:
+        ext = Path((doc.get("file_name") or "").lower()).suffix
+        if ext not in (".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg"):
+            self.say("Для чек-листа нужен PDF, DOCX или картинка.")
+            return
+        dest = self.cfg.data_dir / f"lead_magnet{ext}"
+        self.api.download(doc["file_id"], dest)
+        self.db.set("lead_magnet_file", str(dest))
+        title = caption.split(maxsplit=1)[1].strip(" «»\"") if len(caption.split(maxsplit=1)) > 1 else ""
+        if title:
+            self.db.set("lead_magnet_title", title[:120])
+        self.say("✅ Бот для заявок теперь выдаёт этот файл.\n\n" + self.magnet_text())
+
     def set_menu(self) -> None:
         """Список команд в кнопке «Меню» Telegram — чтобы управление было под рукой."""
         try:
@@ -911,6 +948,7 @@ class AdminBot:
             self.s.vk_status(),
             self.s.yt_status(),
             self.s.tg_status(),
+            *([f"Бот для заявок: @{self.cfg.bot_username.lstrip('@')} — /leads"] if self.cfg.lead_bot_token else []),
             f"Ниша: {self.cfg.niche}",
             f"Тексты роликов пишет: {self.cfg.copy_model or 'основная модель'}"
             + (f" (⚠️ {self.db.get('last_copy_error')[:150]})" if self.db.get("last_copy_error") else ""),

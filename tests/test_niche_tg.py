@@ -22,7 +22,9 @@ class NicheTests(unittest.TestCase):
         keys = set(niche.load("neurophoto"))
         for nid in niche.available():
             n = niche.load(nid)
-            self.assertEqual(set(n), keys, nid)
+            self.assertTrue(keys <= set(n), nid)
+            # необязательные поля — только у ниш с ботом для заявок
+            self.assertTrue(all(k.startswith("lead_") for k in set(n) - keys), nid)
             self.assertTrue(niche.playbook_path(n).exists())
             self.assertTrue(niche.brief_path(n).exists())
         with self.assertRaises(niche.NicheError):
@@ -48,7 +50,7 @@ class NicheTests(unittest.TestCase):
         self.assertIn("как в брифе", prompt)
         fb = planner.fallback(pb, choice, 5, None, "Easyfotobot", n)
         self.assertNotIn("селфи", fb.post_caption)
-        self.assertEqual(fb.script["cta_sub"], "Пишите — ссылка в профиле")
+        self.assertEqual(fb.script["cta_sub"], "Бесплатно — ссылка в профиле")
         qs = scout.search_queries(date(2026, 11, 6), n)
         self.assertIn("ИИ для малого бизнеса новости ноябрь 2026", qs)
         self.assertFalse(any("нейрофото" in q for q in qs))

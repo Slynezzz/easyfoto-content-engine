@@ -1,0 +1,78 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><style>
+@page{size:A4;margin:0}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Inter,"DejaVu Sans",sans-serif;color:#13202f;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.page{width:210mm;height:297mm;padding:16mm 16mm 14mm;position:relative;page-break-after:always;overflow:hidden}
+.page:last-child{page-break-after:auto}
+.head{background:#0f1b2d;color:#fff;margin:-16mm -16mm 9mm;padding:15mm 16mm 11mm;position:relative}
+.head:after{content:"";position:absolute;left:0;right:0;bottom:0;height:3mm;background:linear-gradient(90deg,#14b8a6,#38bdf8)}
+.kicker{font-size:9pt;letter-spacing:.14em;text-transform:uppercase;color:#5eead4;font-weight:600}
+h1{font-family:"Inter Display",Inter,sans-serif;font-size:25pt;line-height:1.12;font-weight:800;margin:3mm 0 3mm;letter-spacing:-.01em}
+.lead{font-size:10.5pt;color:#cbd5e1;line-height:1.45;max-width:160mm}
+.how{font-size:10pt;color:#334155;margin-bottom:5mm}
+.how b{color:#0f1b2d}
+.item{display:flex;gap:4mm;padding:3.1mm 0;border-bottom:.3mm solid #e2e8f0;break-inside:avoid}
+.box{flex:0 0 6mm;height:6mm;border:.5mm solid #0f1b2d;border-radius:1.2mm;margin-top:.6mm}
+.num{flex:0 0 7mm;font-weight:800;color:#14b8a6;font-size:11pt;margin-top:.5mm}
+.t{font-weight:700;font-size:11pt;color:#0f1b2d}
+.s{font-size:9.6pt;color:#475569;line-height:1.42;margin-top:.8mm}
+h2{font-family:"Inter Display",Inter,sans-serif;font-size:15pt;font-weight:800;color:#0f1b2d;margin:2mm 0 4mm}
+.score{display:flex;flex-direction:column;gap:2.5mm;margin-bottom:6mm}
+.row{display:flex;gap:4mm;align-items:flex-start;background:#f1f5f9;border-radius:2.5mm;padding:4mm 5mm}
+.badge{flex:0 0 20mm;font-weight:800;font-size:12pt;color:#0f1b2d}
+.row p{font-size:10pt;line-height:1.45;color:#334155}
+.steps{counter-reset:s;margin-bottom:6mm}
+.step{display:flex;gap:4mm;margin-bottom:3.5mm}
+.step:before{counter-increment:s;content:counter(s);flex:0 0 8mm;height:8mm;border-radius:50%;background:#14b8a6;color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:10.5pt}
+.step p{font-size:10pt;line-height:1.45;color:#334155;padding-top:1.2mm}
+.step b{color:#0f1b2d}
+.cta{background:#0f1b2d;color:#fff;border-radius:3mm;padding:7mm 8mm;position:relative;overflow:hidden}
+.cta:after{content:"";position:absolute;right:-18mm;top:-18mm;width:55mm;height:55mm;border-radius:50%;background:radial-gradient(circle,#14b8a6 0,transparent 70%);opacity:.35}
+.cta h3{font-family:"Inter Display",Inter,sans-serif;font-size:15pt;font-weight:800;margin-bottom:2.5mm}
+.cta p{font-size:10.2pt;line-height:1.5;color:#cbd5e1;max-width:150mm}
+.cta .links{margin-top:4mm;font-size:10.5pt;color:#fff;line-height:1.7}
+.cta .links b{color:#5eead4}
+.foot{position:absolute;left:16mm;right:16mm;bottom:9mm;font-size:8pt;color:#94a3b8;display:flex;justify-content:space-between}
+</style></head><body>
+<div class="page">
+ <div class="head">
+  <div class="kicker">Чек-лист · Максим Карпов, AI-архитектор</div>
+  <h1>12 задач, которые бот может<br>забрать у вашего бизнеса</h1>
+  <div class="lead">Пройдитесь по списку и отметьте задачи, которые у вас сейчас делаются вручную. Это займёт 3 минуты — и станет видно, где бизнес тратит время и теряет клиентов.</div>
+ </div>
+ <div class="how"><b>Как читать:</b> под каждой задачей — признак, по которому видно, что её пора автоматизировать.</div>
+ <div class="item"><div class="box"></div><div class="num">01</div><div><div class="t">Первый ответ на заявку</div><div class="s">Клиент пишет вечером или в выходные и ждёт ответа до утра — а за это время уходит к тому, кто ответил быстрее.</div></div></div>
+ <div class="item"><div class="box"></div><div class="num">02</div><div><div class="t">Ответы на одни и те же вопросы</div><div class="s">Цены, адрес, график, наличие: сотрудник пишет одно и то же много раз в день.</div></div></div>
+ <div class="item"><div class="box"></div><div class="num">03</div><div><div class="t">Уточнение заявки до разговора</div><div class="s">Менеджер тратит звонок на вопросы, которые можно задать заранее: что нужно, к какому сроку, на какой бюджет рассчитывают.</div></div></div>
+ <div class="item"><div class="box"></div><div class="num">04</div><div><div class="t">Запись и бронирование</div><div class="s">Чтобы записаться, клиенту нужно несколько сообщений туда-обратно, а свободное время сотрудник смотрит вручную.</div></div></div>
+ <div class="item"><div class="box"></div><div class="num">05</div><div><div class="t">Напоминания о визите</div><div class="s">Клиенты забывают о записи, а напоминают им вручную — или не напоминают вовсе.</div></div></div>
+ <div class="item"><div class="box"></div><div class="num">06</div><div><div class="t">Оплата и выдача доступа</div><div class="s">Реквизиты отправляют руками, оплату сверяют по выписке, доступ к материалам или каналу выдают вручную.</div></div></div>
+ <div class="item"><div class="box"></div><div class="num">07</div><div><div class="t">Перенос заявок в CRM или таблицу</div><div class="s">Данные клиента копируют из мессенджера вручную — что-то теряется, что-то вносится с ошибками.</div></div></div>
+ <div class="item"><div class="box"></div><div class="num">08</div><div><div class="t">Сбор отзывов</div><div class="s">Отзывы просят от случая к случаю, и довольные клиенты уходят молча.</div></div></div>
+ <div class="item"><div class="box"></div><div class="num">09</div><div><div class="t">Возврат клиентов</div><div class="s">База клиентов лежит без дела: тем, кто давно не приходил, никто не пишет с поводом вернуться.</div></div></div>
+ <div class="foot"><span>Максим Карпов · автоматизация бизнес-процессов и контента с помощью ИИ</span><span>1 / 2</span></div>
+</div>
+<div class="page">
+ <div class="item"><div class="box"></div><div class="num">10</div><div><div class="t">Отчёт владельцу</div><div class="s">Чтобы узнать, сколько за день было заявок, записей и оплат, нужно спрашивать сотрудников или собирать цифры самому.</div></div></div>
+ <div class="item"><div class="box"></div><div class="num">11</div><div><div class="t">Материалы по шаблону</div><div class="s">Презентации, описания объектов, подборки и карточки собирают вручную, хотя структура каждый раз одна и та же.</div></div></div>
+ <div class="item" style="margin-bottom:8mm"><div class="box"></div><div class="num">12</div><div><div class="t">Контент для соцсетей</div><div class="s">Посты выходят, «когда дошли руки», а идеи и тексты каждый раз придумываются с нуля.</div></div></div>
+ <h2>Сколько отметок получилось</h2>
+ <div class="score">
+  <div class="row"><div class="badge">0–2</div><p>Процессы в хорошем порядке. Бот может закрыть отдельные точечные задачи — без большой перестройки.</p></div>
+  <div class="row"><div class="badge">3–5</div><p>Есть с чего начать. Выберите одну задачу — ту, где больше всего теряется клиентов или времени, — и начните с неё.</p></div>
+  <div class="row"><div class="badge">6+</div><p>Бизнес держится на ручной работе. Начинать стоит с карты процессов целиком, а не с одного бота — иначе автоматизация получится лоскутной.</p></div>
+ </div>
+ <h2>Как начать правильно</h2>
+ <div class="steps">
+  <div class="step"><p><b>Опишите процесс так, как он идёт сейчас:</b> кто что делает, в каком мессенджере или программе, сколько раз в день.</p></div>
+  <div class="step"><p><b>Найдите узкое место:</b> где клиент ждёт ответа или где сотрудник повторяет одно и то же.</p></div>
+  <div class="step"><p><b>Автоматизируйте один шаг</b>, проверьте его на реальных клиентах — и только потом переходите к следующему.</p></div>
+ </div>
+ <div class="cta">
+  <h3>Бесплатный разбор вашей задачи</h3>
+  <p>Отметили три пункта и больше — напишите, какой процесс хотите разгрузить. Я посмотрю, как он устроен сейчас, и подскажу, что автоматизировать в первую очередь и каким способом.</p>
+  <div class="links">Бот для заявок: <b>@slyness_bot</b> → «Бесплатный разбор задачи»<br>Лично в Telegram: <b>@max_karpov</b> · Разборы и кейсы: <b>t.me/proj_reality</b></div>
+ </div>
+ <div class="foot"><span>Максим Карпов · автоматизация бизнес-процессов и контента с помощью ИИ</span><span>2 / 2</span></div>
+</div>
+</body></html>

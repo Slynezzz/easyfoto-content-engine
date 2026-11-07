@@ -89,6 +89,26 @@ CREATE TABLE IF NOT EXISTS crossposts (
     external_id TEXT, url TEXT, error TEXT, updated_at TEXT,
     PRIMARY KEY (post_id, platform)
 );
+-- заявки из бота для заявок (эксперт): кто пришёл, откуда, что ответил
+CREATE TABLE IF NOT EXISTS leads (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL UNIQUE,
+    username TEXT, name TEXT,
+    source TEXT, medium TEXT, campaign TEXT, post_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'new',  -- new | magnet | form | lead | contacted | rejected
+    step TEXT,                           -- шаг анкеты разбора, NULL — не в анкете
+    sphere TEXT, task TEXT, tried TEXT, contact TEXT, phone TEXT,
+    extra_msgs TEXT,                     -- id голосовых/файлов из анкеты (JSON) — переслать владельцу
+    magnet_at TEXT, form_at TEXT, contacted_at TEXT,
+    nudged INTEGER NOT NULL DEFAULT 0,   -- 1 — напомнили про анкету, 2 — и про разбор после чек-листа
+    reminded INTEGER NOT NULL DEFAULT 0, -- напомнили владельцу ответить
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+-- сообщения в чате владельца с ботом заявок → чей это клиент (ответ на них уходит клиенту)
+CREATE TABLE IF NOT EXISTS lead_msgs (
+    owner_msg_id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL
+);
 """
 
 
