@@ -104,6 +104,25 @@ CREATE TABLE IF NOT EXISTS leads (
     reminded INTEGER NOT NULL DEFAULT 0, -- напомнили владельцу ответить
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+-- кодовые слова в комментариях Instagram и ответы на них (engine/keywords.py)
+CREATE TABLE IF NOT EXISTS keywords (
+    id INTEGER PRIMARY KEY,
+    word TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT,
+    uses INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kw_events (
+    comment_id TEXT PRIMARY KEY,
+    keyword_id INTEGER,
+    post_id INTEGER,
+    username TEXT,
+    status TEXT NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL
+);
 -- сообщения в чате владельца с ботом заявок → чей это клиент (ответ на них уходит клиенту)
 CREATE TABLE IF NOT EXISTS lead_msgs (
     owner_msg_id INTEGER PRIMARY KEY,

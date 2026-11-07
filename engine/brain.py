@@ -20,7 +20,7 @@ import secrets
 from collections import Counter
 from pathlib import Path
 
-from . import brief, images, niche, platforms, postcard, research
+from . import brief, images, keywords, niche, platforms, postcard, research
 from . import playbook as pbm
 from .config import Config
 from .db import DB
@@ -288,6 +288,8 @@ def write(cfg: Config, db: DB, ai: AI, request: dict, kind: str = "post") -> dic
     facts = research.facts_block(found)
     prompt = write_prompt(request, stage, segment, author_ok, strat, audiences,
                           lead_winners(db), pb.get("trend_notes", []), facts)
+    if request.get("platform") == "ig" and keywords.prompt_hint(db):
+        prompt += "\n\n" + keywords.prompt_hint(db)
     if kind == "carousel":
         prompt += "\n" + CAROUSEL_SCHEMA.replace("{{", "{").replace("}}", "}")
     elif kind == "dialog":
@@ -491,6 +493,7 @@ def reel_context(cfg: Config, db: DB, ai: AI, request: dict) -> dict:
         "stage_text": f"{st['title']} — {st['goal']}. Призыв: {st['cta']}.",
         "objections": strat["objections"][:4],
         "author_ok": bool(images.pick_refs(db)),
+        "kw_hint": keywords.prompt_hint(db) if request.get("platform") == "ig" else "",
     }
 
 
@@ -555,7 +558,8 @@ def adapt_post(cfg: Config, db: DB, ai: AI, src_id: int, platform: str) -> int:
     strat = strategy()
     length = strat.get("length", {}).get(platform, "1200–2000 символов")
     facts = research.facts_block({"facts": (b.get("research") or {}).get("facts") or []})
-    prompt = "\n".join([f"ПЛОЩАДКА: {pl['rules']}", f"Объём: {length}. Хэштегов: до {pl['hashtags']}.", facts, "",
+    prompt = "\n".join([f"ПЛОЩАДКА: {pl['rules']}", f"Объём: {length}. Хэштегов: до {pl['hashtags']}.", facts,
+                         keywords.prompt_hint(db) if platform == "ig" else "", "",
                          "ИСХОДНЫЙ ПОСТ:", b.get("body") or src["caption"] or ""])
     try:
         res = _ask(ai, cfg, ADAPT_SYSTEM + "\n\nБРИФ:\n" + (brief.load(cfg) or ""), prompt)

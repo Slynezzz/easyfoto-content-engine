@@ -58,8 +58,10 @@ def parse_start(param: str) -> dict:
     source = parts[1] or None
     medium = parts[2] if len(parts) > 2 else None
     campaign = "_".join(parts[3:]) or None
-    m = re.fullmatch(r"p(\d+)", campaign or "")
-    return {"source": source, "medium": medium, "campaign": campaign, "post_id": int(m.group(1)) if m else None}
+    m = re.search(r"(?:^|k\d+)p(\d+)$", campaign or "")    # p12 или k5p12 (кодовое слово + пост)
+    k = re.match(r"k(\d+)(?:p\d+)?$", campaign or "")
+    return {"source": source, "medium": medium, "campaign": campaign, "post_id": int(m.group(1)) if m else None,
+            "keyword_id": int(k.group(1)) if k and medium == "kw" else None}
 
 
 def links_text(cfg: Config) -> str:

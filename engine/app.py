@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import analyst, balances, brain, funnel, images, leads, niche, occasions, playbook as pbm, scout, server
+from . import analyst, balances, brain, funnel, images, keywords, leads, niche, occasions, playbook as pbm, scout, server
 from .admin_bot import AdminBot, Services, retry_keyboard
 from .config import Config
 from .db import DB
@@ -573,6 +573,18 @@ class Engine:
             self.say("⚠️ Не удалось продлить токен Instagram. Если не исправить, через ~60 дней публикация остановится.")
         return ok
 
+    def job_ig_comments(self) -> int:
+        """Кодовые слова в комментариях Instagram → материал в директ. Ошибки — владельцу, не чаще раза в 6 ч."""
+        res = keywords.scan(self.cfg, self.db, self.ig)
+        if res["errors"]:
+            last = float(self.db.get("kw_error_at", "0") or 0)
+            if time.time() - last > 6 * 3600:
+                self.db.set("kw_error_at", str(time.time()))
+                self.say("⚠️ Кодовые слова Instagram: " + "; ".join(res["errors"][:3])[:900]
+                         + "\nЕсли ошибка про права (permission) — перевыпусти токен Instagram с разрешениями "
+                           "instagram_business_manage_comments и instagram_business_manage_messages.")
+        return res["replied"]
+
     def job_leads(self) -> int:
         """Напоминания бота для заявок: брошенная анкета, чек-лист без разбора, заявка без ответа."""
         return self.leadbot.job() if self.leadbot else 0
@@ -593,6 +605,7 @@ class Engine:
             ("token", timedelta(days=7) if self.db.get("ig_token_seen_at") else timedelta(days=2), self.job_token),
             ("cleanup", timedelta(hours=12), self.job_cleanup),
             ("leads", timedelta(minutes=10), self.job_leads),
+            ("ig_comments", timedelta(minutes=3), self.job_ig_comments),
         ]
         for name, period, fn in jobs:
             if not self._every(name, period):

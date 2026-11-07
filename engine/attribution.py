@@ -18,7 +18,7 @@ from .db import DB
 
 WINDOW = timedelta(hours=48)
 VALUE = {"reg": 1.0, "photo": 2.0, "bought": 6.0}
-POST_RE = re.compile(r"^p(\d+)$")
+POST_RE = re.compile(r"(?:^|k\d+)p(\d+)$")  # p12, а у кодовых слов — k5p12
 
 
 def _dt(v) -> datetime | None:
@@ -58,7 +58,7 @@ def attribute(users: list[dict], pubs: dict[str, list[tuple[int, datetime]]]) ->
         a["points"] += share * (VALUE["reg"] + VALUE["photo"] * u["photo"] + VALUE["bought"] * u["bought"])
 
     for u in users:
-        m = POST_RE.match(u.get("campaign") or "")
+        m = POST_RE.search(u.get("campaign") or "")
         if m:
             add(int(m.group(1)), u, 1.0)
             continue

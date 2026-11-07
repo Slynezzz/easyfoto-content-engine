@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import brief, funnel, images, music, musicgen, niche
+from . import brief, funnel, images, keywords, music, musicgen, niche
 from . import platforms
 from . import playbook as pbm
 from .config import Config
@@ -48,6 +48,7 @@ HELP = """Команды:
 /links — ссылки на бот с меткой для шапки каждой соцсети
 /leads — заявки из бота для заявок: откуда пришли, кто взял чек-лист, кто оставил заявку
 /magnet — какой чек-лист выдаёт бот заявок (заменить — прислать PDF с подписью «чеклист»)
+/keywords — кодовые слова в комментариях Instagram: что выдаёт каждое, добавить, удалить
 /analyze — пересчитать плейбук по статистике
 /create — создать ролик: выбрать тему (новость, тренд, инфоповод, проблему или свою) и площадку
 /status — состояние и кнопки: остановить/включить генерацию и публикации
@@ -71,7 +72,7 @@ GEN_OFF = ("⏸ Генерация остановлена: новые ролик
            "Тренды, статистика и еженедельные отчёты продолжают собираться. Уже одобренные ролики выходят "
            "по расписанию (остановить их — «Пауза публикаций»).")
 GEN_ON = "▶️ Генерация включена: ролики снова собираются по расписанию."
-MENU = [{"command": "create", "description": "Создать ролик: тема → площадка"},
+MENU = [{"command": "create", "description": "Создать контент: тема → площадка → формат"},
         {"command": "status", "description": "Состояние и кнопки старт/стоп"},
         {"command": "stop", "description": "Остановить генерацию роликов"},
         {"command": "run", "description": "Включить генерацию роликов"},
@@ -79,6 +80,8 @@ MENU = [{"command": "create", "description": "Создать ролик: тем�
         {"command": "queue", "description": "Очередь роликов"},
         {"command": "trends", "description": "Тренды сейчас"},
         {"command": "stats", "description": "Статистика роликов"},
+        {"command": "leads", "description": "Заявки: откуда пришли"},
+        {"command": "keywords", "description": "Кодовые слова Instagram"},
         {"command": "balance", "description": "Балансы и ключи"},
         {"command": "help", "description": "Все команды"}]
 
@@ -367,6 +370,10 @@ class AdminBot:
 
     def on_file(self, msg: dict) -> None:
         kind = self._kind_from_caption(msg)
+        cap = (msg.get("caption") or "").strip()
+        if cap.lower().startswith(("слово ", "кодовое ")):  # материал для кодового слова
+            self.on_keyword_file(msg, cap)
+            return
         if msg.get("photo"):
             file_id, ext = msg["photo"][-1]["file_id"], ".jpg"
         else:
@@ -770,6 +777,10 @@ class AdminBot:
         elif cmd == "/leads":
             self.say(self.s.leads_text() if self.s.leads_text else
                      "Бот для заявок не подключён: добавь в Railway LEAD_BOT_TOKEN и BOT_USERNAME.")
+        elif cmd == "/keywords":
+            self.say_keywords()
+        elif cmd == "/keyword":
+            self.on_keyword_command(args)
         elif cmd == "/magnet":
             if args and args[0].lower() == "reset":
                 self.db.set("lead_magnet_file", "")
@@ -976,6 +987,48 @@ class AdminBot:
                     self.say(f"#{pid_} собран, отправлю его чуть позже.")
         self.run_bg(job)
 
+    def say_keywords(self) -> None:
+        rows = keywords.all_(self.db)
+        kb = {"inline_keyboard": [[{"text": f"🗑 {k['word']}", "callback_data": f"kwdel:{k['id']}"}]
+                                  for k in rows]} if rows else None
+        self.say(keywords.list_text(self.db), kb)
+
+    def on_keyword_command(self, args: list[str]) -> None:
+        if args and args[0] in ("-", "удалить", "del") and len(args) > 1:
+            self.say(f"Удалено: {args[1].upper()}" if keywords.remove(self.db, args[1]) else "Такого слова нет.")
+            return
+        try:
+            word, title, kind, payload = keywords.parse_command(args)
+            keywords.add(self.db, word, title, kind, payload)
+        except keywords.KeywordError as e:
+            self.say(f"⚠️ {e}")
+            return
+        self.say(f"✅ Кодовое слово {word.upper()} выдаёт: {keywords.KIND_RU[kind]}.")
+        self.say_keywords()
+
+    def on_keyword_file(self, msg: dict, caption: str) -> None:
+        """Файл или картинка с подписью «слово РАЗБОР Название» — материал для кодового слова."""
+        parts = caption.split(maxsplit=2)
+        word = parts[1] if len(parts) > 1 else ""
+        title = parts[2] if len(parts) > 2 else ""
+        if msg.get("photo"):
+            file_id, ext = msg["photo"][-1]["file_id"], ".jpg"
+        else:
+            file_id = msg["document"]["file_id"]
+            ext = Path((msg["document"].get("file_name") or "").lower()).suffix
+        if ext not in (".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg", ".webp", ".xlsx", ".pptx"):
+            self.say("Для материала подходит PDF, DOCX, XLSX, PPTX или картинка.")
+            return
+        if not keywords.WORD_RE.match(word):
+            self.say("Подпись: «слово РАЗБОР Название материала» — слово из букв или цифр, 2–24 символа.")
+            return
+        tmp = self.cfg.data_dir / f"kw_upload{ext}"
+        self.api.download(file_id, tmp)
+        path = keywords.store_file(self.cfg, tmp, word)
+        keywords.add(self.db, word, title, "file", str(path))
+        self.say(f"✅ Кодовое слово {word.upper()} выдаёт файл «{title or 'Материал'}».")
+        self.say_keywords()
+
     def magnet_text(self) -> str:
         from . import leads
         custom = self.db.get("lead_magnet_file")
@@ -1056,6 +1109,11 @@ class AdminBot:
             return
         if data.startswith("ctl:"):
             self.on_control_callback(cq, data)
+            return
+        if data.startswith("kwdel:"):
+            ok = keywords.remove(self.db, data.split(":", 1)[1])
+            self.api.answer_callback(cq["id"], "Удалено" if ok else "Уже удалено")
+            self.say_keywords()
             return
         if data.startswith(("ct:", "cp:", "ck:")):
             self.on_create_callback(cq, data)

@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 
-from . import funnel, niche
+from . import funnel, keywords, niche
 from .config import Config
 from .db import DB, now_iso
 from .telegram import TelegramAPI, TelegramError
@@ -265,9 +265,15 @@ class LeadBot:
         text = (msg.get("text") or "").strip()
         if text.startswith("/start"):
             parts = text.split(maxsplit=1)
-            row = upsert(self.db, user, parts[1] if len(parts) > 1 else None)
+            param = parts[1] if len(parts) > 1 else None
+            row = upsert(self.db, user, param)
             if row["step"]:
                 update(self.db, uid, step=None)
+            kid = funnel.parse_start(param or "").get("keyword_id")
+            k = keywords.get(self.db, kid) if kid else None
+            if k:  # пришёл по кодовому слову из Instagram — сразу выдаём обещанное
+                self.deliver(uid, k)
+                return
             self.welcome(uid)
             return
         if text == "/delete":
@@ -288,7 +294,32 @@ class LeadBot:
         if step in STEPS:
             self.answer(uid, step, msg, text)
             return
+        k = keywords.find_in(self.db, text) if text and len(text) <= 40 else None
+        if k:  # кодовое слово написали прямо в бот
+            self.deliver(uid, k)
+            return
         self.relay_from_user(msg, row)
+
+    def deliver(self, uid: int, k) -> None:
+        """Материал по кодовому слову: чек-лист, свой файл, ссылка или текст — и предложение разбора."""
+        if k["kind"] == "magnet":
+            self.send_magnet(uid)
+            return
+        if k["kind"] == "file" and k["payload"] and Path(k["payload"]).is_file():
+            self.api.send_document(uid, Path(k["payload"]), f"📎 {k['title']}")
+        elif k["kind"] == "link":
+            self.api.send_message(uid, f"📎 {k['title']}: {k['payload']}")
+        elif k["kind"] == "text":
+            self.api.send_message(uid, k["payload"])
+        else:
+            self.send_magnet(uid)
+            return
+        row = get(self.db, uid)
+        update(self.db, uid, magnet_at=row["magnet_at"] or now_iso(),
+               status="magnet" if row["status"] == "new" else row["status"])
+        self.api.send_message(uid, f"Хотите, {self.p['first']} бесплатно разберёт ваш процесс и подскажет, что "
+                                   "автоматизировать в первую очередь?",
+                              _kb([[("🧩 Да, хочу разбор", "lb:form")], [("📋 Ещё чек-лист", "lb:magnet")]]))
 
     def answer(self, uid: int, step: str, msg: dict, text: str) -> None:
         value = text

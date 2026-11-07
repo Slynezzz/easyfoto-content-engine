@@ -124,6 +124,8 @@ def request_lines(request: dict | None) -> list[str]:
                   "тезисов: ответ на хук → факты с цифрами (только из фактов выше) → что сделать → вывод; "
                   "каждая подпись понятна без звука. Текст поста раскрывает тему с фактами и источниками "
                   "(«по данным …»), без воды."]
+    if request.get("kw_hint"):
+        lines.append(request["kw_hint"])
     if request.get("stage_text"):
         lines.append(f"ЭТАП ВОРОНКИ: {request['stage_text']}")
     if request.get("objections"):
