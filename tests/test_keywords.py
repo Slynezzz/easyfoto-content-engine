@@ -164,3 +164,25 @@ class SafeUrlTests(unittest.TestCase):
                     "ftp://example.com/", "javascript:alert(1)"):
             self.assertFalse(websearch.safe_url(bad), bad)
             self.assertEqual(websearch.page_text(bad), "")
+
+
+class StreamedProxyTests(unittest.TestCase):
+    def test_sse_answer_is_merged(self):
+        from engine import llm
+        sse = ('data: {"id":"1","object":"chat.completion.chunk","model":"gemini-3.8","choices":[{"delta":'
+               '{"content":"{\\"a\\": "}}]}\n\n'
+               'data: {"id":"1","object":"chat.completion.chunk","choices":[{"delta":{"content":"1}"}}]}\n\n'
+               'data: [DONE]\n')
+        resp = mock.Mock(status_code=200, text=sse)
+        resp.json.side_effect = ValueError("not json")
+        with mock.patch.object(llm.requests, "post", return_value=resp):
+            data = llm._post("https://x/v1/chat/completions", json={})
+        self.assertEqual(llm.parse_json(data["choices"][0]["message"]["content"]), {"a": 1})
+
+    def test_html_still_reported(self):
+        from engine import llm
+        resp = mock.Mock(status_code=200, text="<html>сайт</html>")
+        resp.json.side_effect = ValueError("not json")
+        with mock.patch.object(llm.requests, "post", return_value=resp):
+            with self.assertRaises(llm.AIHTTPError):
+                llm._post("https://x/v1/chat/completions", json={})

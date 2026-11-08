@@ -101,6 +101,9 @@ def _post(url: str, *, retries: int = 3, timeout: int = 120, retry_timeouts: boo
                 try:
                     return r.json()
                 except ValueError:
+                    merged = _merge_sse(r.text)
+                    if merged is not None:  # посредник ответил потоком, хотя поток не просили
+                        return merged
                     # по адресу отвечает не API, а, например, сайт посредника
                     raise AIHTTPError(200, f"ответ не JSON: {r.text[:120]}") from None
             body = _error_text(r)
@@ -463,6 +466,7 @@ class AI:
             "model": model,
             "temperature": temperature,
             "response_format": {"type": "json_object"},
+            "stream": False,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
         }
         data = _post(url, headers={"Authorization": f"Bearer {key}"}, json=body)
@@ -689,7 +693,7 @@ class AI:
             content.append({"type": "image_url",
                             "image_url": {"url": f"data:{part['mimeType']};base64,{part['data']}"}})
         content.append({"type": "text", "text": prompt + "\n\nВерни одно изображение, вертикальное 9:16."})
-        body = {"model": model, "messages": [{"role": "user", "content": content}]}
+        body = {"model": model, "stream": False, "messages": [{"role": "user", "content": content}]}
         url = f"{base}/v1/chat/completions"
         headers = {"Authorization": f"Bearer {key}"}
         needs = getattr(self, "_needs_modalities", set())
@@ -776,6 +780,45 @@ def rank_image_models(ids: list[str], exclude: str = "") -> list[str]:
 
 _DATA_URL = re.compile(r"data:(image/[a-zA-Z+.-]+);base64,([A-Za-z0-9+/=\r\n]+)")
 _HTTP_IMG = re.compile(r"https?://[^\s)\]\"']+\.(?:png|jpe?g|webp)(?:\?[^\s)\]\"']*)?", re.I)
+
+
+def _merge_sse(text: str) -> dict | None:
+    """Ответ потоком (SSE: строки «data: {...chunk}») → обычный ответ Chat Completions.
+    Некоторые посредники отдают поток, даже когда stream=false; склеиваем кусочки текста
+    и картинки, чтобы остальной код работал как обычно."""
+    if not text.lstrip().startswith("data:"):
+        return None
+    content, images, model = [], [], ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(payload)
+        except ValueError:
+            continue
+        model = chunk.get("model") or model
+        for ch in chunk.get("choices") or []:
+            delta = ch.get("delta") or ch.get("message") or {}
+            c = delta.get("content")
+            if isinstance(c, str):
+                content.append(c)
+            elif isinstance(c, list):
+                for part in c:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        content.append(part.get("text") or "")
+                    elif isinstance(part, dict):
+                        images.append(part)
+            images += delta.get("images") or []
+    if not content and not images:
+        return None
+    msg = {"role": "assistant", "content": "".join(content)}
+    if images:
+        msg["images"] = images
+    return {"model": model, "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}]}
 
 
 def _from_url(url: str) -> tuple[bytes, str] | None:

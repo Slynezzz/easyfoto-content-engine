@@ -49,6 +49,7 @@ HELP = """Команды:
 /leads — заявки из бота для заявок: откуда пришли, кто взял чек-лист, кто оставил заявку
 /magnet — какой чек-лист выдаёт бот заявок (заменить — прислать PDF с подписью «чеклист»)
 /keywords — кодовые слова в комментариях Instagram: что выдаёт каждое, добавить, удалить
+/fit 3 — сократить текст поста №3 под лимит подписи его площадки (картинка остаётся)
 /analyze — пересчитать плейбук по статистике
 /create — создать ролик: выбрать тему (новость, тренд, инфоповод, проблему или свою) и площадку
 /status — состояние и кнопки: остановить/включить генерацию и публикации
@@ -107,6 +108,7 @@ class Services:
     vk_retry: Callable[[int], str] | None = None
     balances_text: Callable[[], str] = lambda: "Проверка балансов недоступна"
     leads_text: Callable[[], str] | None = None             # сводка бота для заявок (если подключён)
+    fit_post: Callable[[int], int] | None = None             # сократить текст поста под лимит площадки
     vk_status: Callable[[], str] = lambda: "VK: не подключён"
     yt_status: Callable[[], str] = lambda: "YouTube: не подключён"
     ig_status: Callable[[], str] | None = None
@@ -116,14 +118,17 @@ class Services:
     tg_status: Callable[[], str] = lambda: "Telegram-канал: не подключён"
 
 
-def approval_keyboard(post_id: int) -> dict:
-    return {"inline_keyboard": [
+def approval_keyboard(post_id: int, too_long: str = "") -> dict:
+    rows = [
         [{"text": "✅ В расписание", "callback_data": f"ok:{post_id}"},
          {"text": "⚡ Сейчас", "callback_data": f"now:{post_id}"}],
         [{"text": "🔁 Другой вариант", "callback_data": f"redo:{post_id}"},
          {"text": "❌ Отклонить", "callback_data": f"no:{post_id}"}],
         [{"text": "📝 Текст поста", "callback_data": f"txt:{post_id}"}],
-    ]}
+    ]
+    if too_long:  # текст длиннее подписи площадки — сократить, сохранив картинку
+        rows.insert(2, [{"text": f"✂️ Сократить под лимит {too_long}", "callback_data": f"fit:{post_id}"}])
+    return {"inline_keyboard": rows}
 
 
 def retry_keyboard(post_id: int) -> dict:
@@ -220,6 +225,12 @@ class AdminBot:
             head += (f"\nФакты: {len(r['facts'])} ({r['method']}), источников в тексте: {len(b.get('sources') or [])}"
                      if r.get("facts") else
                      f"\n⚠️ Фактов из поиска нет — пост без цифр. {(r.get('error') or '')[:150]}")
+        over = ""
+        if is_post and post["target"]:
+            limit = platforms.text_budget(post["target"])
+            if len(post["caption"] or "") > limit:
+                over = f"{platforms.get(post['target'])['title']} ({limit} знаков)"
+                head += f"\n⚠️ Текст {len(post['caption'])} знаков — не помещается в подпись {over}."
         text = post["caption"] or plan["post_caption"]
         caption = f"{head}\n\n{text}"
         # подпись к видео в Telegram — до 1024 символов; длинный текст поста шлём следом целиком
@@ -228,7 +239,8 @@ class AdminBot:
             caption, follow = head[:1024], f"Текст поста #{post_id}:\n\n{text}"[:4096]
         try:
             if is_post:
-                msg = self.api.send_photo(self.admin, post["cover_path"], caption, approval_keyboard(post_id))
+                msg = self.api.send_photo(self.admin, post["cover_path"], caption,
+                                          approval_keyboard(post_id, over))
             else:
                 msg = self.api.send_video(self.admin, post["video_path"], caption,
                                           approval_keyboard(post_id), cover=post["cover_path"])
@@ -777,6 +789,11 @@ class AdminBot:
         elif cmd == "/leads":
             self.say(self.s.leads_text() if self.s.leads_text else
                      "Бот для заявок не подключён: добавь в Railway LEAD_BOT_TOKEN и BOT_USERNAME.")
+        elif cmd == "/fit":
+            if not args or not args[0].lstrip("#").isdigit() or not self.s.fit_post:
+                self.say("Напишите номер поста: /fit 3 — текст сократится под лимит подписи его площадки.")
+            else:
+                self.on_callback({"id": "", "data": f"fit:{args[0].lstrip('#')}", "message": {}})
         elif cmd == "/keywords":
             self.say_keywords()
         elif cmd == "/keyword":
@@ -1109,6 +1126,20 @@ class AdminBot:
             return
         if data.startswith("ctl:"):
             self.on_control_callback(cq, data)
+            return
+        if data.startswith("fit:") and data[4:].isdigit() and self.s.fit_post:
+            post_id = int(data[4:])
+            self.api.answer_callback(cq["id"], "Сокращаю…")
+
+            def job():
+                try:
+                    n = self.s.fit_post(post_id)
+                except Exception as e:  # noqa: BLE001
+                    self.say(f"⚠️ Не получилось сократить #{post_id}: {e}")
+                    return
+                self.say(f"✂️ Текст #{post_id} сокращён до {n} знаков — картинка та же.")
+                self.send_for_approval(post_id)
+            self.run_bg(job)
             return
         if data.startswith("kwdel:"):
             ok = keywords.remove(self.db, data.split(":", 1)[1])

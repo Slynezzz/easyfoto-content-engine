@@ -573,6 +573,23 @@ class Engine:
             self.say("⚠️ Не удалось продлить токен Instagram. Если не исправить, через ~60 дней публикация остановится.")
         return ok
 
+    def fit_post(self, post_id: int) -> int:
+        """Сокращает текст готового поста под лимит подписи его площадки; картинка остаётся."""
+        post = self.db.post(post_id)
+        if not post or post["status"] not in ("rendered", "pending"):
+            raise ValueError("пост уже опубликован или отклонён")
+        body = (post["caption"] or "").split("\n\nИсточники:")[0]
+        tags = [w for w in body.split() if w.startswith("#")] if post["target"] in ("ig", "vk") else []
+        for t in tags:
+            body = body.replace(t, "")
+        caption, _ = brain.fit_caption(self.cfg, self.ai, {"body": body.strip(), "hashtags": tags, "sources": []},
+                                       post["target"])
+        plan = json.loads(post["script_json"] or "{}")
+        plan["post_caption"] = caption
+        self.db.update_post(post_id, caption=caption, script_json=json.dumps(plan, ensure_ascii=False),
+                            status="rendered")  # снова на одобрение — уже с новым текстом
+        return len(caption)
+
     def job_ig_comments(self) -> int:
         """Кодовые слова в комментариях Instagram → материал в директ. Ошибки — владельцу, не чаще раза в 6 ч."""
         res = keywords.scan(self.cfg, self.db, self.ig)
@@ -650,6 +667,7 @@ def build(cfg: Config) -> tuple[Engine, AdminBot | None]:
             on_approved=engine.on_approved,
             vk_connect=engine.vk.save_token,
             make_request=engine.make_request,
+            fit_post=engine.fit_post,
             auto_plan=engine.auto_plan,
             vk_login=engine.vk.start_login,
             vk_retry=engine.vk_retry,

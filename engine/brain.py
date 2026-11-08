@@ -137,7 +137,7 @@ CAROUSEL_SCHEMA = """
               "source": "источник цифры на слайде (если есть цифра), иначе пусто"}}, ... от 4 до 6 слайдов],
   "cta_slide": {{"title": "призыв до 45 символов", "text": "до 160 символов — по правилам этапа и площадки"}}
 Слайды идут логикой: ответ на заголовок → факты → что делать → вывод. Каждый слайд понятен сам по себе.
-Поле "body" для карусели — подпись 600–1200 символов: суть, зачем листать, призыв; детали — на слайдах."""
+Поле "body" для карусели — подпись (объём — в требованиях выше): суть, зачем листать, призыв; детали — на слайдах."""
 
 DIALOG_SCHEMA = """
 Это ПОСТ С ПЕРЕПИСКОЙ: картинкой будет макет чата клиента с ботом — наглядный пример сценария
@@ -185,6 +185,14 @@ def clean_subline(s: str) -> str:
     return s[:1].upper() + s[1:]
 
 
+def length_for(strat: dict, platform: str | None, kind: str = "post") -> str:
+    """Объём текста под площадку и формат: в Telegram пост с картинкой — это подпись (до 1024 знаков)."""
+    rule = strat.get("length", {}).get(platform or "tg", {})
+    if isinstance(rule, str):
+        return rule
+    return rule.get(kind) or rule.get("post") or "800–1500 символов"
+
+
 def _clip(s: str, n: int) -> str:
     s = (s or "").strip()
     return s if len(s) <= n else s[: n - 1].rstrip() + "…"
@@ -194,7 +202,7 @@ def write_prompt(request: dict, stage: str, segment: str | None, author_ok: bool
                  audiences: dict, winners: list[str], trends: list[str], facts: str = "") -> str:
     st = strat["stages"][stage]
     pl = platforms.get(request.get("platform")) or platforms.get("tg")
-    length = strat.get("length", {}).get(request.get("platform") or "tg", "1500–2500 символов")
+    length = length_for(strat, request.get("platform"), request.get("kind", "post"))
     lines = [
         f"ТЕМА (заказ владельца): {request.get('title', '')}",
         "Заголовок и текст — строго про эту тему, её ключевые слова — в заголовке или первой строке. "
@@ -244,7 +252,7 @@ def write_prompt(request: dict, stage: str, segment: str | None, author_ok: bool
 
 def critic_prompt(draft: dict, request: dict, stage: str, strat: dict, facts: str = "") -> str:
     pl = platforms.get(request.get("platform")) or platforms.get("tg")
-    length = strat.get("length", {}).get(request.get("platform") or "tg", "1500–2500 символов")
+    length = length_for(strat, request.get("platform"), request.get("kind", "post"))
     return "\n".join([
         f"Тема: {request.get('title', '')}",
         f"Объём текста: {length}",
@@ -276,6 +284,7 @@ def _ask(ai: AI, cfg: Config, system: str, prompt: str) -> dict:
 
 def write(cfg: Config, db: DB, ai: AI, request: dict, kind: str = "post") -> dict:
     """Текст поста и сцена картинки. Возвращает dict с полями поста и метаданными стратегии."""
+    request = {**request, "kind": kind}
     strat = strategy()
     pb = pbm.load(cfg.playbook_path)
     audiences = pb.get("audiences", {})
@@ -394,6 +403,57 @@ def picture(cfg: Config, db: DB, ai: AI, image: dict) -> tuple["object", str]:
         raise AIError("посредник вернул не картинку") from None
 
 
+SHORTEN_SYSTEM = """Ты — редактор. Сократи пост до заданного числа знаков (это жёсткий лимит площадки для подписи
+к картинке). Сохрани: первую цепляющую строку, прямой ответ на тему, самые сильные факты с источником
+(«по данным …»), один практический шаг и призыв в конце. Убери повторы, вводные слова и второстепенные
+примеры. Новых фактов не добавляй. Отвечай ТОЛЬКО JSON: {"body": "сокращённый текст"}"""
+
+
+def _trim_paragraphs(body: str, limit: int) -> str:
+    """Запасной вариант без нейросети: оставляем первый абзац и призыв, середину убираем с конца."""
+    paras = [p for p in body.split("\n\n") if p.strip()]
+    while len("\n\n".join(paras)) > limit and len(paras) > 2:
+        paras.pop(-2)
+    text = "\n\n".join(paras)
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "), cut.rfind("\n"))
+    return (cut[: end + 1] if end > limit // 2 else cut.rstrip()) + ("" if end > limit // 2 else "…")
+
+
+def fit_caption(cfg: Config, ai: AI, post: dict, platform: str | None) -> tuple[str, dict]:
+    """Подпись в лимите площадки: сначала без блока источников, затем сокращение редактором,
+    в крайнем случае — без нейросети по абзацам. Возвращает (подпись, пост с итоговым текстом)."""
+    budget = platforms.text_budget(platform)
+    caption = compose_caption(post, platform)
+    if len(caption) <= budget:
+        return caption, post
+    lean = {**post, "sources": []}  # в тексте источники уже названы: «по данным …»
+    caption = compose_caption(lean, platform)
+    if len(caption) <= budget:
+        return caption, lean
+    tags = len(" ".join(post.get("hashtags") or [])) + 2
+    target = budget - tags - 20
+    body = post["body"]
+    for attempt in range(2):
+        try:
+            res = _ask(ai, cfg, SHORTEN_SYSTEM,
+                       f"Лимит: {target - 60 * attempt} знаков (сейчас {len(body)}).\n\nПОСТ:\n{body}")
+            short = str(res.get("body") or "").strip()
+        except AIError as e:
+            log.warning("shorten failed: %s", e)
+            break
+        if short and len(short) <= target:
+            body = short
+            break
+        body = short or body
+    if len(body) > target:
+        body = _trim_paragraphs(body, target)
+    lean = {**lean, "body": body}
+    return compose_caption(lean, platform), lean
+
+
 def compose_caption(post: dict, platform: str | None = None) -> str:
     """Текст поста; в Telegram и VK — с источниками (там ссылки работают), в Instagram — без ссылок."""
     text = post["body"].strip()
@@ -451,7 +511,7 @@ def make_post(cfg: Config, db: DB, ai: AI, request: dict, kind: str = "post") ->
                          author_photo=post["image"].get("mode") == "author")
     brand = ""  # подпись автора на картинках не нужна: она не кликается и ничего не добавляет
     slides = render_slides(cfg, post, token, request.get("platform"), brand) if kind == "carousel" else []
-    caption = compose_caption(post, request.get("platform"))
+    caption, post = fit_caption(cfg, ai, post, request.get("platform"))
     script = {"script": {"hook": post["headline"]}, "post_caption": caption, "llm_ok": True, "slides": slides,
               "brain": {k: post[k] for k in ("stage", "segment", "insight", "objection", "hooks", "critic", "mechanic",
                                       "research", "sources", "slides", "dialog")}
@@ -534,8 +594,10 @@ def polish_reel(cfg: Config, ai: AI, plan, request: dict):
     if len(text) >= 80:
         plan.post_caption = text[: planner.LIMITS["post_caption"]]
     sources = used_sources(plan.post_caption, request.get("facts") or [])
-    if request.get("platform") in ("tg", "vk") and sources:
-        plan.post_caption += "\n\nИсточники:\n" + "\n".join(f"— {s['source']}: {s['url']}" for s in sources)
+    platform = request.get("platform")
+    if platform in ("tg", "vk"):  # подпись к видео — в лимите площадки (в Telegram — 1024 знака)
+        plan.post_caption, _ = fit_caption(cfg, ai, {"body": plan.post_caption, "hashtags": [],
+                                                     "sources": sources}, platform)
     plan.script = sc
     return plan
 
@@ -556,7 +618,7 @@ def adapt_post(cfg: Config, db: DB, ai: AI, src_id: int, platform: str) -> int:
     b = plan.get("brain") or {}
     pl = platforms.get(platform)
     strat = strategy()
-    length = strat.get("length", {}).get(platform, "1200–2000 символов")
+    length = length_for(strat, platform, src["format"])
     facts = research.facts_block({"facts": (b.get("research") or {}).get("facts") or []})
     prompt = "\n".join([f"ПЛОЩАДКА: {pl['rules']}", f"Объём: {length}. Хэштегов: до {pl['hashtags']}.", facts,
                          keywords.prompt_hint(db) if platform == "ig" else "", "",
@@ -569,7 +631,9 @@ def adapt_post(cfg: Config, db: DB, ai: AI, src_id: int, platform: str) -> int:
     if len(body) < 80:
         raise BrainError(f"пустой текст для {platforms.label(platform)}")
     tags = [t if str(t).startswith("#") else f"#{t}" for t in (res.get("hashtags") or []) if t][: pl["hashtags"]]
-    caption = compose_caption({"body": body, "hashtags": tags, "sources": b.get("sources") or []}, platform)
+    caption, fitted = fit_caption(cfg, ai, {"body": body, "hashtags": tags, "sources": b.get("sources") or []},
+                                  platform)
+    body = fitted["body"]
 
     token = secrets.token_urlsafe(18)
     cover = cfg.media_dir / f"{token}.jpg"

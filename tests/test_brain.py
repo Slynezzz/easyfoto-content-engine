@@ -495,3 +495,59 @@ class AllPlatformsTests(BrainTests):
         bot.on_callback({"id": "c", "data": f"cp:{tid}:all", "message": {"message_id": 9}})
         bot.on_callback({"id": "c", "data": f"ck:{tid}:all:post", "message": {"message_id": 9}})
         self.assertEqual(calls, [("all", "post")])
+
+
+class CaptionLimitTests(BrainTests):
+    def test_tg_caption_fits_1024_with_cta(self):
+        from engine import platforms
+        long_body = ("Абзац с фактом по данным VK. " * 12 + "\n\n") * 6 + "Забирайте чек-лист в боте."
+        ai = FakeAI()
+        ai.json = lambda system, prompt, **k: {"body": "Короткая версия по данным VK. Забирайте чек-лист."}
+        cap, post = brain.fit_caption(self.cfg, ai, {"body": long_body, "hashtags": [],
+                                                     "sources": [{"source": "VK", "url": "https://vk.com/p"}]}, "tg")
+        self.assertLessEqual(len(cap), platforms.text_budget("tg"))
+        self.assertEqual(cap, "Короткая версия по данным VK. Забирайте чек-лист.")
+
+    def test_fallback_trim_keeps_cta(self):
+        from engine import platforms
+        ai = FakeAI()
+        ai.json = mock.Mock(side_effect=AIError("down"))
+        body = "Первый абзац — суть.\n\n" + "\n\n".join(f"Пункт {i}. " + "Текст " * 40 for i in range(8)) + \
+            "\n\nПризыв: забирайте чек-лист."
+        cap, _ = brain.fit_caption(self.cfg, ai, {"body": body, "hashtags": [], "sources": []}, "tg")
+        self.assertLessEqual(len(cap), platforms.text_budget("tg"))
+        self.assertTrue(cap.startswith("Первый абзац"))
+        self.assertTrue(cap.endswith("Призыв: забирайте чек-лист."))
+
+    def test_short_caption_untouched_and_ig_limit(self):
+        cap, _ = brain.fit_caption(self.cfg, FakeAI(), {"body": "Коротко.", "hashtags": ["#a"], "sources": []}, "ig")
+        self.assertEqual(cap, "Коротко.\n\n#a")
+
+    def test_writer_gets_caption_length_for_tg_post(self):
+        ai = FakeAI()
+        brain.write(self.cfg, self.db, ai, self.req("tg"))
+        self.assertIn("подпись к картинке", ai.calls[-2][1])
+
+
+class FitButtonTests(AdminCreatePostTests):
+    def test_long_tg_post_gets_fit_button(self):
+        pid = self.db.create_post(status="rendered", format="post", hook_id="post_x", theme="stage_trust",
+                                  target="tg", cover_path=str(self.cfg.media_dir / "tok_tok_tok_tok_tok2.jpg"),
+                                  media_token="tok_tok_tok_tok_tok2", caption="Длинный текст. " * 120,
+                                  script_json=json.dumps({"script": {"hook": "Хук"}, "llm_ok": True}))
+        fitted = []
+
+        def fit(post_id):
+            fitted.append(post_id)
+            self.db.update_post(post_id, caption="Коротко.", status="rendered")
+            return 8
+        self.bot.s.fit_post = fit
+        self.bot.run_bg = lambda fn: fn()
+        self.assertTrue(self.bot.send_for_approval(pid))
+        kb = self.api.send_photo.call_args.args[3]
+        self.assertEqual(kb["inline_keyboard"][2][0]["callback_data"], f"fit:{pid}")
+        self.assertIn("не помещается", self.api.send_photo.call_args.args[2])
+        self.cb(f"fit:{pid}")
+        self.assertEqual(fitted, [pid])
+        kb2 = self.api.send_photo.call_args.args[3]
+        self.assertFalse(any(r[0]["callback_data"].startswith("fit:") for r in kb2["inline_keyboard"]))
