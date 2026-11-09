@@ -60,5 +60,6 @@
   "cta_label": "Чек-лист и бесплатный разбор вашей задачи",
   "fallback_title": "Что бизнесу отдать боту",
   "posts": true,
-  "caption_limit": 48
+  "caption_limit": 48,
+  "native_cta": true
 }

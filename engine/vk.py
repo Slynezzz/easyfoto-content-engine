@@ -280,7 +280,8 @@ class VK:
         nic = niche.load(self.cfg.niche)
         label = "Написать мне" if self.cfg.cta_url and not self.cfg.lead_bot_token else nic["cta_label"]
         caption = (post["caption"] or "").strip()
-        text = f"{caption}\n\n👉 {label}: {link}"
+        # личный бренд: читателя из VK никуда не уводим — призыв уже в тексте (личка, комментарии)
+        text = caption if nic.get("native_cta") else f"{caption}\n\n👉 {label}: {link}"
         return (hook or nic["fallback_title"])[:120], text[:4000]
 
     def publish(self, post_id: int) -> str:

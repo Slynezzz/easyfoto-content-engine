@@ -24,7 +24,7 @@ class NicheTests(unittest.TestCase):
             n = niche.load(nid)
             self.assertTrue(keys <= set(n), nid)
             # необязательные поля — только у ниш с ботом для заявок
-            self.assertTrue(all(k.startswith("lead_") or k in ("posts", "caption_limit") for k in set(n) - keys), nid)
+            self.assertTrue(all(k.startswith("lead_") or k in ("posts", "caption_limit", "native_cta") for k in set(n) - keys), nid)
             self.assertTrue(niche.playbook_path(n).exists())
             self.assertTrue(niche.brief_path(n).exists())
         with self.assertRaises(niche.NicheError):

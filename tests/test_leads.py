@@ -244,10 +244,10 @@ class CtaLinkTests(unittest.TestCase):
         self.assertIn(f"Чек-лист и бесплатный разбор вашей задачи: https://t.me/slyness_bot?start=utm_tg_post_p{pid}", tg)
         title, vk = VK(cfg, db).text_for(post)
         self.assertEqual(title, "Что бизнесу отдать боту")
-        self.assertIn(f"utm_vk_clip_p{pid}", vk)
+        self.assertNotIn("t.me", vk)  # личный бренд: из VK никуда не уводим
         ytitle, desc = YouTube(cfg, db).text_for(post)
         self.assertTrue(ytitle.startswith("Что бизнесу отдать боту"))
-        self.assertIn(f"utm_yt_short_p{pid}", desc)
+        self.assertNotIn("t.me", desc)  # и из YouTube тоже
 
     def test_privacy_page(self):
         cfg = Config(data_dir=Path(tempfile.mkdtemp()), niche="expert", bot_username="slyness_bot")

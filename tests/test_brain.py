@@ -38,7 +38,7 @@ class FakeAI:
 
     def json(self, system, prompt, images=None, temperature=0.9, model=None):
         self.calls.append((system, prompt, model))
-        if "редактор-критик" in system:
+        if system.startswith("Ты — редактор-критик"):
             if self.critic_fail:
                 raise AIError("critic down")
             return {"scores": {"хук": 4}, "fixes": ["усилил первую строку"],
@@ -551,3 +551,22 @@ class FitButtonTests(AdminCreatePostTests):
         self.assertEqual(fitted, [pid])
         kb2 = self.api.send_photo.call_args.args[3]
         self.assertFalse(any(r[0]["callback_data"].startswith("fit:") for r in kb2["inline_keyboard"]))
+
+
+class NativeCtaTests(BrainTests):
+    def test_vk_and_yt_texts_have_no_external_links_for_expert(self):
+        from engine.vk import VK
+        from engine.youtube import YouTube
+        self.cfg.lead_bot_token, self.cfg.bot_username = "x", "slyness_bot"
+        pid = self.db.create_post(status="approved", format="post", hook_id="h", theme="t", caption="Текст поста",
+                                  script_json=json.dumps({"script": {"hook": "Хук"}}))
+        _, vk = VK(self.cfg, self.db).text_for(self.db.post(pid))
+        self.assertEqual(vk, "Текст поста")
+        _, yt = YouTube(self.cfg, self.db).text_for(self.db.post(pid))
+        self.assertNotIn("t.me", yt)
+
+    def test_writer_gets_platform_cta(self):
+        ai = FakeAI()
+        brain.write(self.cfg, self.db, ai, self.req("vk"))
+        self.assertIn("ПРИЗЫВ НА ЭТОЙ ПЛОЩАДКЕ: Читателя никуда не уводим", ai.calls[-2][1])
+        self.assertIn("ПРИЗЫВ НА ЭТОЙ ПЛОЩАДКЕ", ai.calls[-1][1])

@@ -185,6 +185,11 @@ def clean_subline(s: str) -> str:
     return s[:1].upper() + s[1:]
 
 
+def platform_cta(strat: dict, platform: str | None) -> str:
+    """Призыв, который оставляет читателя на той же площадке, где он увидел пост."""
+    return strat.get("platform_cta", {}).get(platform or "", "вопрос в комментариях")
+
+
 def length_for(strat: dict, platform: str | None, kind: str = "post") -> str:
     """Объём текста под площадку и формат: в Telegram пост с картинкой — это подпись (до 1024 знаков)."""
     rule = strat.get("length", {}).get(platform or "tg", {})
@@ -233,6 +238,7 @@ def write_prompt(request: dict, stage: str, segment: str | None, author_ok: bool
         "КАРТА ВОЗРАЖЕНИЙ: " + "; ".join(strat["objections"]),
         "",
         f"ПЛОЩАДКА: {pl['rules']}",
+        f"ПРИЗЫВ НА ЭТОЙ ПЛОЩАДКЕ: {platform_cta(strat, request.get('platform'))}",
         "",
         "КАРТИНКА: " + ("можно показать автора (mode=author) — если пост личный: история, кейс, закулисье, "
                         "мнение; автор в реалистичной сцене, по пояс; иначе illustration."
@@ -260,6 +266,7 @@ def critic_prompt(draft: dict, request: dict, stage: str, strat: dict, facts: st
         "Если в тексте есть цифра, которой нет в фактах, — убери её или замени фактом из списка.",
         f"Этап воронки: {strat['stages'][stage]['title']} — {strat['stages'][stage]['goal']}",
         f"Площадка: {pl['rules']}",
+        f"ПРИЗЫВ НА ЭТОЙ ПЛОЩАДКЕ: {platform_cta(strat, request.get('platform'))}",
         "",
         "ЧЕК-ЛИСТ:", *[f"  {i + 1}. {c}" for i, c in enumerate(strat["critic"])],
         "",
@@ -550,7 +557,8 @@ def reel_context(cfg: Config, db: DB, ai: AI, request: dict) -> dict:
         "facts": found.get("facts", []),
         "research_method": found.get("method", ""),
         "stage": stage,
-        "stage_text": f"{st['title']} — {st['goal']}. Призыв: {st['cta']}.",
+        "stage_text": f"{st['title']} — {st['goal']}. Призыв: {st['cta']}. "
+                      f"ПРИЗЫВ НА ЭТОЙ ПЛОЩАДКЕ: {platform_cta(strat, request.get('platform'))}",
         "objections": strat["objections"][:4],
         "author_ok": bool(images.pick_refs(db)),
         "kw_hint": keywords.prompt_hint(db) if request.get("platform") == "ig" else "",
@@ -620,7 +628,8 @@ def adapt_post(cfg: Config, db: DB, ai: AI, src_id: int, platform: str) -> int:
     strat = strategy()
     length = length_for(strat, platform, src["format"])
     facts = research.facts_block({"facts": (b.get("research") or {}).get("facts") or []})
-    prompt = "\n".join([f"ПЛОЩАДКА: {pl['rules']}", f"Объём: {length}. Хэштегов: до {pl['hashtags']}.", facts,
+    prompt = "\n".join([f"ПЛОЩАДКА: {pl['rules']}", f"ПРИЗЫВ НА ЭТОЙ ПЛОЩАДКЕ: {platform_cta(strat, platform)}",
+                         f"Объём: {length}. Хэштегов: до {pl['hashtags']}.", facts,
                          keywords.prompt_hint(db) if platform == "ig" else "", "",
                          "ИСХОДНЫЙ ПОСТ:", b.get("body") or src["caption"] or ""])
     try:

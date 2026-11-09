@@ -191,7 +191,8 @@ class YouTube:
         link = funnel.cta_link(self.cfg, "yt", "short", f"p{post['id']}")
         caption = (post["caption"] or "").strip()
         label = "Связаться" if self.cfg.cta_url and not self.cfg.lead_bot_token else nic["cta_label"]
-        desc = f"{caption}\n\n👉 {label} — ссылка в шапке канала. Или: {link}"
+        desc = (caption if nic.get("native_cta")  # личный бренд: общение — в комментариях YouTube
+                else f"{caption}\n\n👉 {label} — ссылка в шапке канала. Или: {link}")
         return title[:100], desc[:4900]
 
     def publish(self, post_id: int) -> str:
